@@ -1,0 +1,48 @@
+{
+  "id": 149386461,
+  "uuid": "580c2b5d-133a-4c25-9be5-8565cae7e745",
+  "code": "HD000976",
+  "purchaseDate": "2026-04-23T07:05:42.9530000",
+  "branchId": 347499,
+  "branchName": "Chi nhánh trung tâm",
+  "soldById": 462578,
+  "soldByName": "Thái Toàn",
+  "customerCode": "",
+  "customerName": "",
+  "orderId": 127512740,
+  "orderUuid": "580c2b5d-133a-4c25-9be5-8565cae7e745",
+  "orderCode": "11-60",
+  "total": 165000,
+  "totalPayment": 165000,
+  "discount": 0,
+  "status": 1,
+  "statusValue": "Hoàn thành",
+  "usingCod": false,
+  "createdDate": "2026-04-23T07:05:42.9770000",
+  "invoiceDetails": [
+    {
+      "productId": 4957637,
+      "productCode": "SP000058",
+      "productName": "Bánh Mì",
+      "quantity": 3,
+      "price": 5000,
+      "discount": 0,
+      "discountRatio": 0,
+      "subTotal": 15000,
+      "note": "",
+      "returnQuantity": 0
+    },
+    {
+      "productId": 4957620,
+      "productCode": "SP000057",
+      "productName": "Bò né",
+      "quantity": 3,
+      "price": 50000,
+      "discount": 0,
+      "discountRatio": 0,
+      "subTotal": 150000,
+      "note": "",
+      "returnQuantity": 0
+    }
+  ]
+}

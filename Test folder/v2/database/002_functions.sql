@@ -1,0 +1,1137 @@
+﻿-- Chill Manager v2 - Views and RPC functions
+
+create or replace function public.app_role()
+returns text
+language sql
+stable
+security definer
+set search_path = public, auth
+as $$
+  select coalesce((
+    select role from public.employee_accounts
+    where auth_user_id = auth.uid() and status = 'active'
+    limit 1
+  ), 'anonymous');
+$$;
+
+create or replace function public.app_is_owner_manager()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, auth
+as $$ select public.app_role() in ('owner','manager'); $$;
+
+create or replace function public.app_is_staff_or_above()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, auth
+as $$ select public.app_role() in ('owner','manager','staff_operator'); $$;
+
+create or replace view public.daily_product_summary_view as
+select
+  so.business_date,
+  soi.product_id,
+  soi.product_code,
+  soi.product_name,
+  soi.category_name,
+  sum(soi.quantity) as total_quantity,
+  sum(soi.line_total) as total_revenue,
+  count(distinct so.id) as order_count
+from public.sales_orders so
+join public.sales_order_items soi on soi.sales_order_id = so.id
+group by so.business_date, soi.product_id, soi.product_code, soi.product_name, soi.category_name;
+
+create or replace view public.product_sales_hourly_view as
+select
+  so.business_date,
+  date_trunc('hour', so.purchase_at) as sale_hour,
+  soi.product_name,
+  sum(soi.quantity) as total_quantity,
+  sum(soi.line_total) as total_revenue
+from public.sales_orders so
+join public.sales_order_items soi on soi.sales_order_id = so.id
+group by so.business_date, date_trunc('hour', so.purchase_at), soi.product_name;
+
+create or replace view public.cash_drawer_timeline_view as
+select
+  e.*,
+  sum(case when e.direction = 'in' then e.amount when e.direction = 'out' then -e.amount else 0 end)
+    over (partition by e.business_date order by e.occurred_at, e.created_at, e.id) as running_balance_delta
+from public.cash_drawer_events e;
+
+create or replace view public.cash_reconciliation_input_view as
+with openings as (
+  select business_date, sum(opening_total) opening_cash from public.cash_day_openings group by business_date
+), pos_cash as (
+  select so.business_date, sum(sp.amount) pos_cash_total
+  from public.sales_orders so join public.sales_payments sp on sp.sales_order_id = so.id
+  where sp.payment_method = 'cash'
+  group by so.business_date
+), expenses as (
+  select business_date, sum(amount) expense_cash_total from public.expenses where payment_method = 'cash' group by business_date
+), payroll as (
+  select business_date, sum(total_pay) payroll_cash_total from public.shift_payroll_records where payment_method = 'cash' group by business_date
+)
+select
+  coalesce(o.business_date, p.business_date, e.business_date, pr.business_date) as business_date,
+  coalesce(o.opening_cash, 0) as opening_cash,
+  coalesce(p.pos_cash_total, 0) as pos_cash_total,
+  coalesce(e.expense_cash_total, 0) as expense_cash_total,
+  coalesce(pr.payroll_cash_total, 0) as payroll_cash_total,
+  coalesce(o.opening_cash, 0) + coalesce(p.pos_cash_total, 0) - coalesce(e.expense_cash_total, 0) - coalesce(pr.payroll_cash_total, 0) as theory_cash
+from openings o
+full join pos_cash p using (business_date)
+full join expenses e using (business_date)
+full join payroll pr using (business_date);
+
+create or replace view public.daily_cash_summary_view as
+select
+  c.business_date,
+  c.opening_cash,
+  c.pos_cash_total,
+  c.expense_cash_total,
+  c.payroll_cash_total,
+  c.theory_cash,
+  cc.total_physical as latest_physical_cash,
+  cc.difference as latest_difference,
+  cc.counted_at as latest_counted_at
+from public.cash_reconciliation_input_view c
+left join lateral (
+  select total_physical, difference, counted_at
+  from public.cash_counts cc
+  where cc.business_date = c.business_date
+  order by counted_at desc
+  limit 1
+) cc on true;
+
+create or replace view public.daily_cash_close_report_view as
+select
+  r.*,
+  coalesce(p.display_name, e.name) as closed_by_name
+from public.cash_close_reports r
+left join public.profiles p on p.id = r.closed_by
+left join public.employee_accounts ea on ea.auth_user_id = r.closed_by
+left join public.employees e on e.id = ea.employee_id;
+
+create or replace function public.compute_cash_theory(
+  p_business_date date,
+  p_counted_at timestamptz default now(),
+  p_bank_transfer_confirmed numeric default 0
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_opening numeric(14,2) := 0;
+  v_pos_total numeric(14,2) := 0;
+  v_pos_cash numeric(14,2) := 0;
+  v_pos_non_cash numeric(14,2) := 0;
+  v_expense numeric(14,2) := 0;
+  v_payroll numeric(14,2) := 0;
+  v_expected_cash numeric(14,2) := 0;
+  v_sync timestamptz;
+begin
+  if p_counted_at > now() + interval '5 minutes' then
+    raise exception 'p_counted_at không được trong tương lai (>5 phút).';
+  end if;
+  if p_counted_at < (p_business_date::timestamptz - interval '7 days') then
+    raise exception 'p_counted_at quá xa quá khứ (>7 ngày so với business_date).';
+  end if;
+
+  select coalesce(sum(opening_total), 0) into v_opening from public.cash_day_openings where business_date = p_business_date;
+  select coalesce(sum(net_amount), 0) into v_pos_total
+  from public.sales_orders
+  where business_date = p_business_date and purchase_at <= p_counted_at;
+  select coalesce(sum(sp.amount), 0) into v_pos_cash
+  from public.sales_orders so join public.sales_payments sp on sp.sales_order_id = so.id
+  where so.business_date = p_business_date and sp.payment_method = 'cash' and so.purchase_at <= p_counted_at;
+  v_pos_non_cash := greatest(0, v_pos_total - v_pos_cash);
+  select coalesce(sum(amount), 0) into v_expense from public.expenses where business_date = p_business_date and payment_method = 'cash' and created_at <= p_counted_at;
+  select coalesce(sum(total_pay), 0) into v_payroll from public.shift_payroll_records where business_date = p_business_date and payment_method = 'cash' and created_at <= p_counted_at;
+  select max(finished_at) into v_sync from public.sales_sync_runs where status = 'success' and business_date_from <= p_business_date and business_date_to >= p_business_date;
+  v_expected_cash := v_opening + v_pos_cash - v_expense - v_payroll;
+
+  return jsonb_build_object(
+    'business_date', p_business_date,
+    'pos_total', v_pos_total,
+    'opening_cash', v_opening,
+    'pos_cash_total', v_pos_cash,
+    'pos_non_cash_total', v_pos_non_cash,
+    'bank_transfer_confirmed', coalesce(p_bank_transfer_confirmed, 0),
+    'expense_cash_total', v_expense,
+    'payroll_cash_total', v_payroll,
+    'theory_cash', v_expected_cash,
+    'sync_snapshot_at', v_sync
+  );
+end;
+$$;
+
+create or replace function public.save_cash_day_opening(p_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_date date := coalesce((p_payload->>'business_date')::date, current_date);
+  v_denominations jsonb := coalesce(p_payload->'denominations_json', '{}'::jsonb);
+  v_carried boolean := coalesce((p_payload->>'carried_from_previous_day')::boolean, false);
+  v_total numeric(14,2) := 0;
+  v_role text := public.app_role();
+  v_existing public.cash_day_openings%rowtype;
+  v_row public.cash_day_openings%rowtype;
+begin
+  if v_role not in ('owner','manager') then
+    raise exception 'Bạn không có quyền nhập tiền đầu ngày.';
+  end if;
+
+  perform 1
+  from jsonb_each_text(v_denominations) as d(k, v)
+  where not (
+    k ~ '^(1000|2000|5000|10000|20000|50000|100000|200000|500000)$'
+    and v ~ '^[0-9]+$'
+    and v::numeric between 0 and 10000
+  );
+  if found then
+    raise exception 'denominations_json: chỉ chấp nhận mệnh giá VND 1k-500k và số lượng 0-10000.';
+  end if;
+
+  select coalesce(sum(key::numeric * value::numeric), 0)
+  into v_total
+  from jsonb_each_text(v_denominations);
+
+  select * into v_existing
+  from public.cash_day_openings
+  where business_date = v_date;
+
+  if found then
+    if v_role <> 'owner' then
+      raise exception 'Tiền đầu ngày đã lưu, chỉ chủ quán được chỉnh sửa.';
+    end if;
+
+    update public.cash_day_openings
+    set denominations_json = v_denominations,
+        opening_total = v_total,
+        carried_from_previous_day = v_carried
+    where id = v_existing.id
+    returning * into v_row;
+  else
+    insert into public.cash_day_openings (
+      business_date,
+      denominations_json,
+      opening_total,
+      carried_from_previous_day,
+      created_by
+    )
+    values (
+      v_date,
+      v_denominations,
+      v_total,
+      v_carried,
+      auth.uid()
+    )
+    returning * into v_row;
+  end if;
+
+  delete from public.cash_drawer_events
+  where business_date = v_date
+    and event_type = 'opening_cash'
+    and source = 'app_action';
+
+  if v_total > 0 then
+    insert into public.cash_drawer_events (
+      business_date,
+      occurred_at,
+      event_type,
+      direction,
+      amount,
+      created_by,
+      source,
+      note,
+      raw_json
+    )
+    values (
+      v_date,
+      now(),
+      'opening_cash',
+      'in',
+      v_total,
+      auth.uid(),
+      'app_action',
+      'Tiền đầu ngày',
+      to_jsonb(v_row)
+    );
+  end if;
+
+  return to_jsonb(v_row);
+end;
+$$;
+
+create or replace function public.dashboard_daily_ops(p_business_date date)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_sales numeric(14,2) := 0;
+  v_cash numeric(14,2) := 0;
+  v_non_cash numeric(14,2) := 0;
+  v_opening numeric(14,2) := 0;
+  v_expenses numeric(14,2) := 0;
+  v_payroll numeric(14,2) := 0;
+  v_active integer := 0;
+  v_latest_count jsonb;
+  v_latest_sync jsonb;
+  v_expense_list jsonb;
+  v_sales_list jsonb;
+begin
+  if not public.app_is_staff_or_above() and public.app_role() <> 'employee_viewer' then
+    raise exception 'Bạn chưa có quyền xem dashboard.';
+  end if;
+
+  select coalesce(sum(net_amount), 0) into v_sales from public.sales_orders where business_date = p_business_date;
+  select coalesce(sum(sp.amount), 0) into v_cash from public.sales_orders so join public.sales_payments sp on sp.sales_order_id = so.id where so.business_date = p_business_date and sp.payment_method = 'cash';
+  v_non_cash := greatest(0, v_sales - v_cash);
+  select coalesce(sum(opening_total), 0) into v_opening from public.cash_day_openings where business_date = p_business_date;
+  select coalesce(sum(amount), 0) into v_expenses from public.expenses where business_date = p_business_date and payment_method = 'cash';
+  select coalesce(sum(total_pay), 0) into v_payroll from public.shift_payroll_records where business_date = p_business_date and payment_method = 'cash';
+  select count(*) into v_active from public.shift_assignments where business_date = p_business_date and status = 'checked_in';
+
+  select to_jsonb(cc) into v_latest_count from (select id, business_date, count_type, counted_at, total_physical, total_theory, difference, pos_total, pos_cash_total, pos_non_cash_total, opening_cash, bank_transfer_confirmed, reconciliation_total from public.cash_counts where business_date = p_business_date order by counted_at desc limit 1) cc;
+  select to_jsonb(sr) into v_latest_sync from (select id, source, status, started_at, finished_at from public.sales_sync_runs where business_date_from <= p_business_date and business_date_to >= p_business_date order by finished_at desc nulls last limit 1) sr;
+
+  select coalesce(jsonb_agg(jsonb_build_object('id', e.id, 'business_date', e.business_date, 'description', e.description, 'quantity', e.quantity, 'unit', e.unit, 'unit_price', e.unit_price, 'amount', e.amount, 'note', e.note, 'created_at', e.created_at, 'category_id', e.category_id, 'category_name', c.name) order by e.created_at desc), '[]'::jsonb)
+  into v_expense_list
+  from public.expenses e left join public.expense_categories c on c.id = e.category_id
+  where e.business_date = p_business_date;
+
+  select coalesce(jsonb_agg(jsonb_build_object('id', so.id, 'invoice_code', so.invoice_code, 'order_code', so.table_or_order_code, 'sold_by_name', so.sold_by_name, 'payment_method', coalesce(sp.payment_method, 'mixed'), 'net_amount', so.net_amount, 'total_payment', so.total_payment, 'purchase_at', so.purchase_at) order by so.purchase_at desc), '[]'::jsonb)
+  into v_sales_list
+  from public.sales_orders so
+  left join lateral (select payment_method from public.sales_payments sp where sp.sales_order_id = so.id order by amount desc limit 1) sp on true
+  where so.business_date = p_business_date;
+
+  return jsonb_build_object('business_date', p_business_date, 'total_sales', v_sales, 'cash_sales', v_cash, 'non_cash_sales', v_non_cash, 'opening_cash', v_opening, 'total_expenses', v_expenses, 'payroll_paid', v_payroll, 'active_staff', v_active, 'latest_cash_count', v_latest_count, 'latest_sync', v_latest_sync, 'expenses', v_expense_list, 'sales_orders', v_sales_list);
+end;
+$$;
+
+create or replace function public.create_expense(p_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_id uuid;
+  v_amount numeric(14,2);
+  v_date date;
+begin
+  if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền tạo khoản chi.'; end if;
+  if length(coalesce(p_payload->>'description','')) > 500 then
+    raise exception 'description vượt 500 ký tự.';
+  end if;
+  if length(coalesce(p_payload->>'note','')) > 1000 then
+    raise exception 'note vượt 1000 ký tự.';
+  end if;
+  v_amount := coalesce((p_payload->>'amount')::numeric, 0);
+  v_date := coalesce((p_payload->>'business_date')::date, current_date);
+  if v_amount < 0 or v_amount > 1000000000 then
+    raise exception 'amount phải >= 0 và <= 1,000,000,000.';
+  end if;
+  if coalesce((p_payload->>'quantity')::numeric, 0) < 0
+     or coalesce((p_payload->>'unit_price')::numeric, 0) < 0 then
+    raise exception 'quantity/unit_price không được âm.';
+  end if;
+  insert into public.expenses (business_date, category_id, template_id, description, quantity, unit, unit_price, amount, payment_method, note, created_by)
+  values (v_date, nullif(p_payload->>'category_id','')::uuid, nullif(p_payload->>'template_id','')::uuid, p_payload->>'description', coalesce((p_payload->>'quantity')::numeric, 1), p_payload->>'unit', coalesce((p_payload->>'unit_price')::numeric, 0), v_amount, coalesce(p_payload->>'payment_method','cash'), p_payload->>'note', auth.uid())
+  returning id into v_id;
+
+  if coalesce(p_payload->>'payment_method','cash') = 'cash' and v_amount > 0 then
+    insert into public.cash_drawer_events (business_date, occurred_at, event_type, direction, amount, expense_id, created_by, source, note)
+    values (v_date, now(), 'expense_cash_out', 'out', v_amount, v_id, auth.uid(), 'app_action', p_payload->>'description');
+  end if;
+
+  return jsonb_build_object('id', v_id);
+end;
+$$;
+
+create or replace function public.create_expense_template(p_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_label text := trim(coalesce(p_payload->>'label', ''));
+  v_category uuid := nullif(p_payload->>'default_category_id','')::uuid;
+  v_unit text := nullif(trim(coalesce(p_payload->>'default_unit', '')), '');
+  v_price numeric(14,2) := coalesce(nullif(p_payload->>'last_unit_price','')::numeric, 0);
+  v_row public.expense_templates%rowtype;
+begin
+  if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền tạo mẫu chi.'; end if;
+  if v_label = '' then raise exception 'Tên mẫu chi không được để trống.'; end if;
+
+  select * into v_row
+  from public.expense_templates
+  where is_active and lower(trim(label)) = lower(v_label)
+  limit 1;
+
+  if found then
+    update public.expense_templates
+    set default_category_id = coalesce(v_category, default_category_id),
+        default_unit = coalesce(v_unit, default_unit),
+        last_unit_price = case when v_price > 0 then v_price else last_unit_price end,
+        updated_at = now()
+    where id = v_row.id
+    returning * into v_row;
+  else
+    insert into public.expense_templates (label, default_category_id, default_unit, last_unit_price, usage_count, is_active)
+    values (v_label, v_category, v_unit, v_price, 0, true)
+    returning * into v_row;
+  end if;
+
+  return to_jsonb(v_row);
+end;
+$$;
+
+create or replace function public.check_in_employee(p_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_employee uuid := (p_payload->>'employee_id')::uuid;
+  v_date date := coalesce((p_payload->>'business_date')::date, current_date);
+  v_id uuid;
+begin
+  if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền vào ca.'; end if;
+  select id into v_id from public.shift_assignments where employee_id = v_employee and status = 'checked_in' order by check_in_at desc limit 1;
+  if v_id is null then
+    insert into public.shift_assignments (employee_id, business_date, check_in_at, status, created_by, updated_by)
+    values (v_employee, v_date, coalesce((p_payload->>'check_in_at')::timestamptz, now()), 'checked_in', auth.uid(), auth.uid()) returning id into v_id;
+  end if;
+  return jsonb_build_object('shift_assignment_id', v_id);
+end;
+$$;
+
+create or replace function public.check_out_employee(p_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_shift uuid := (p_payload->>'shift_assignment_id')::uuid;
+  v_employee uuid := (p_payload->>'employee_id')::uuid;
+  v_date date := coalesce((p_payload->>'business_date')::date, current_date);
+  v_in timestamptz := coalesce((p_payload->>'check_in_at')::timestamptz, now());
+  v_out timestamptz := coalesce((p_payload->>'check_out_at')::timestamptz, now());
+  v_minutes integer;
+  v_rate numeric(14,2);
+  v_base numeric(14,2);
+  v_allowance numeric(14,2) := coalesce((p_payload->>'allowance_amount')::numeric, 0);
+  v_total numeric(14,2);
+  v_payroll_id uuid;
+begin
+  if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền ra ca.'; end if;
+  if v_out < v_in then raise exception 'Giờ ra không được nhỏ hơn giờ vào.'; end if;
+  select hourly_rate into v_rate from public.employees where id = v_employee;
+  v_minutes := greatest(0, round(extract(epoch from (v_out - v_in)) / 60)::integer);
+  v_base := round(((v_minutes::numeric / 60) * coalesce(v_rate, 0)) / 1000) * 1000;
+  v_total := v_base + v_allowance;
+
+  update public.shift_assignments set check_in_at = v_in, check_out_at = v_out, total_minutes = v_minutes, status = 'checked_out', updated_by = auth.uid() where id = v_shift;
+
+  insert into public.shift_payroll_records (shift_assignment_id, employee_id, business_date, check_in_at, check_out_at, total_minutes, hourly_rate, base_pay, allowance_amount, total_pay, note, edited_by, edited_at, created_by)
+  values (v_shift, v_employee, v_date, v_in, v_out, v_minutes, coalesce(v_rate, 0), v_base, v_allowance, v_total, p_payload->>'note', auth.uid(), now(), auth.uid())
+  on conflict (shift_assignment_id) do update set check_in_at = excluded.check_in_at, check_out_at = excluded.check_out_at, total_minutes = excluded.total_minutes, hourly_rate = excluded.hourly_rate, base_pay = excluded.base_pay, allowance_amount = excluded.allowance_amount, total_pay = excluded.total_pay, note = excluded.note, edited_by = auth.uid(), edited_at = now()
+  returning id into v_payroll_id;
+
+  delete from public.cash_drawer_events where shift_payroll_record_id = v_payroll_id and event_type = 'payroll_cash_out';
+  if v_total > 0 then
+    insert into public.cash_drawer_events (business_date, occurred_at, event_type, direction, amount, shift_payroll_record_id, created_by, source, note)
+    values (v_date, v_out, 'payroll_cash_out', 'out', v_total, v_payroll_id, auth.uid(), 'app_action', 'Lương theo lượt ra ca');
+  end if;
+
+  return jsonb_build_object('shift_assignment_id', v_shift, 'payroll_record_id', v_payroll_id, 'total_pay', v_total);
+end;
+$$;
+
+create or replace function public.edit_shift_payroll_record(p_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_payroll_id uuid := (p_payload->>'payroll_record_id')::uuid;
+  v_record public.shift_payroll_records%rowtype;
+  v_in timestamptz;
+  v_out timestamptz;
+  v_minutes integer;
+  v_base numeric(14,2);
+  v_allowance numeric(14,2);
+  v_total numeric(14,2);
+  v_note text;
+begin
+  if not public.app_is_owner_manager() then
+    raise exception 'Chỉ chủ quán hoặc quản lý được sửa lượt lương đã chốt.';
+  end if;
+
+  select * into v_record
+  from public.shift_payroll_records
+  where id = v_payroll_id;
+
+  if not found then
+    raise exception 'Không tìm thấy dòng lương cần sửa.';
+  end if;
+
+  v_in := coalesce((p_payload->>'check_in_at')::timestamptz, v_record.check_in_at);
+  v_out := coalesce((p_payload->>'check_out_at')::timestamptz, v_record.check_out_at);
+  v_allowance := coalesce((p_payload->>'allowance_amount')::numeric, v_record.allowance_amount, 0);
+  v_note := case when p_payload ? 'note' then p_payload->>'note' else v_record.note end;
+
+  if v_in is null or v_out is null then
+    raise exception 'Thiếu giờ vào hoặc giờ ra.';
+  end if;
+
+  if v_out < v_in then
+    raise exception 'Giờ ra không được nhỏ hơn giờ vào.';
+  end if;
+
+  v_minutes := greatest(0, round(extract(epoch from (v_out - v_in)) / 60)::integer);
+  v_base := round(((v_minutes::numeric / 60) * coalesce(v_record.hourly_rate, 0)) / 1000) * 1000;
+  v_total := v_base + v_allowance;
+
+  if v_record.shift_assignment_id is not null then
+    update public.shift_assignments
+    set check_in_at = v_in,
+        check_out_at = v_out,
+        total_minutes = v_minutes,
+        status = 'checked_out',
+        updated_by = auth.uid()
+    where id = v_record.shift_assignment_id;
+  end if;
+
+  update public.shift_payroll_records
+  set check_in_at = v_in,
+      check_out_at = v_out,
+      total_minutes = v_minutes,
+      base_pay = v_base,
+      allowance_amount = v_allowance,
+      total_pay = v_total,
+      note = v_note,
+      edited_by = auth.uid(),
+      edited_at = now()
+  where id = v_payroll_id
+  returning * into v_record;
+
+  delete from public.cash_drawer_events
+  where shift_payroll_record_id = v_payroll_id
+    and event_type = 'payroll_cash_out';
+
+  if v_total > 0 then
+    insert into public.cash_drawer_events (
+      business_date,
+      occurred_at,
+      event_type,
+      direction,
+      amount,
+      shift_payroll_record_id,
+      created_by,
+      source,
+      note
+    )
+    values (
+      v_record.business_date,
+      v_out,
+      'payroll_cash_out',
+      'out',
+      v_total,
+      v_payroll_id,
+      auth.uid(),
+      'app_action',
+      'Sửa lượt lương đã chốt'
+    );
+  end if;
+
+  return jsonb_build_object(
+    'payroll_record_id', v_payroll_id,
+    'shift_assignment_id', v_record.shift_assignment_id,
+    'total_minutes', v_minutes,
+    'base_pay', v_base,
+    'allowance_amount', v_allowance,
+    'total_pay', v_total
+  );
+end;
+$$;
+
+create or replace function public.save_cash_count(p_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_date date := coalesce((p_payload->>'business_date')::date, current_date);
+  v_counted_at timestamptz := coalesce((p_payload->>'counted_at')::timestamptz, now());
+  v_physical numeric(14,2) := coalesce((p_payload->>'total_physical')::numeric, 0);
+  v_bank_transfer numeric(14,2) := coalesce((p_payload->>'bank_transfer_confirmed')::numeric, 0);
+  v_theory jsonb;
+  v_theory_cash numeric(14,2);
+  v_pos_total numeric(14,2);
+  v_pos_cash numeric(14,2);
+  v_pos_non_cash numeric(14,2);
+  v_opening numeric(14,2);
+  v_expense numeric(14,2);
+  v_payroll numeric(14,2);
+  v_reconciliation numeric(14,2);
+  v_difference numeric(14,2);
+  v_id uuid;
+begin
+  if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền kiểm két.'; end if;
+
+  perform 1
+  from jsonb_each_text(coalesce(p_payload->'denominations_json','{}'::jsonb)) as d(k, v)
+  where not (
+    k ~ '^(1000|2000|5000|10000|20000|50000|100000|200000|500000)$'
+    and v ~ '^[0-9]+$'
+    and v::numeric between 0 and 10000
+  );
+  if found then
+    raise exception 'denominations_json: chỉ chấp nhận mệnh giá VND 1k-500k và số lượng 0-10000.';
+  end if;
+
+  v_theory := public.compute_cash_theory(v_date, v_counted_at, v_bank_transfer);
+  v_theory_cash := (v_theory->>'theory_cash')::numeric;
+  v_pos_total := (v_theory->>'pos_total')::numeric;
+  v_pos_cash := (v_theory->>'pos_cash_total')::numeric;
+  v_pos_non_cash := (v_theory->>'pos_non_cash_total')::numeric;
+  v_opening := (v_theory->>'opening_cash')::numeric;
+  v_expense := (v_theory->>'expense_cash_total')::numeric;
+  v_payroll := (v_theory->>'payroll_cash_total')::numeric;
+  v_reconciliation := (v_physical - v_opening) + v_bank_transfer + v_expense + v_payroll;
+  v_difference := v_pos_total - v_reconciliation;
+
+  insert into public.cash_counts (business_date, counted_at, count_type, denominations_json, total_physical, total_theory, difference, pos_total, pos_cash_total, pos_non_cash_total, opening_cash, bank_transfer_confirmed, reconciliation_total, note, counted_by, sales_snapshot_at)
+  values (v_date, v_counted_at, coalesce(p_payload->>'count_type','spot_audit'), coalesce(p_payload->'denominations_json','{}'::jsonb), v_physical, v_theory_cash, v_difference, v_pos_total, v_pos_cash, v_pos_non_cash, v_opening, v_bank_transfer, v_reconciliation, p_payload->>'note', auth.uid(), nullif(v_theory->>'sync_snapshot_at','')::timestamptz)
+  returning id into v_id;
+
+  insert into public.cash_drawer_events (business_date, occurred_at, event_type, direction, amount, cash_count_id, created_by, source, note, raw_json)
+  values (v_date, v_counted_at, 'cash_count_snapshot', 'snapshot', v_physical, v_id, auth.uid(), 'app_action', p_payload->>'note', v_theory);
+
+  return jsonb_build_object('cash_count_id', v_id, 'difference', v_difference, 'reconciliation_total', v_reconciliation, 'theory', v_theory);
+end;
+$$;
+
+create or replace function public.finalize_cash_close_report(p_cash_count_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_count public.cash_counts%rowtype;
+  v_theory jsonb;
+  v_report_id uuid;
+  v_existing public.cash_close_reports%rowtype;
+  v_pos_total numeric(14,2);
+  v_pos_cash numeric(14,2);
+  v_pos_non_cash numeric(14,2);
+  v_opening numeric(14,2);
+  v_bank_transfer numeric(14,2);
+  v_expense numeric(14,2);
+  v_payroll numeric(14,2);
+  v_theory_cash numeric(14,2);
+  v_reconciliation numeric(14,2);
+  v_difference numeric(14,2);
+begin
+  if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền chốt báo cáo két.'; end if;
+  select * into v_count from public.cash_counts where id = p_cash_count_id;
+  if not found then raise exception 'Không tìm thấy bản kiểm két.'; end if;
+  select * into v_existing from public.cash_close_reports where cash_count_id = p_cash_count_id;
+  if found and v_existing.report_status = 'final' then
+    return jsonb_build_object('report_id', v_existing.id, 'status', 'final');
+  end if;
+
+  v_theory := public.compute_cash_theory(v_count.business_date, v_count.counted_at, v_count.bank_transfer_confirmed);
+  v_pos_total := coalesce(nullif(v_count.pos_total, 0), (v_theory->>'pos_total')::numeric);
+  v_pos_cash := coalesce(nullif(v_count.pos_cash_total, 0), (v_theory->>'pos_cash_total')::numeric);
+  v_pos_non_cash := coalesce(nullif(v_count.pos_non_cash_total, 0), (v_theory->>'pos_non_cash_total')::numeric);
+  v_opening := coalesce(nullif(v_count.opening_cash, 0), (v_theory->>'opening_cash')::numeric);
+  v_bank_transfer := coalesce(v_count.bank_transfer_confirmed, (v_theory->>'bank_transfer_confirmed')::numeric, 0);
+  v_expense := (v_theory->>'expense_cash_total')::numeric;
+  v_payroll := (v_theory->>'payroll_cash_total')::numeric;
+  v_theory_cash := (v_theory->>'theory_cash')::numeric;
+  v_reconciliation := coalesce(nullif(v_count.reconciliation_total, 0), (v_count.total_physical - v_opening) + v_bank_transfer + v_expense + v_payroll);
+  v_difference := coalesce(v_count.difference, v_pos_total - v_reconciliation);
+
+  insert into public.cash_close_reports (
+    business_date, cash_count_id, closed_at, closed_by,
+    pos_total, opening_cash, pos_cash_total, pos_non_cash_total, bank_transfer_confirmed,
+    expense_cash_total, payroll_cash_total, theory_cash, reconciliation_total,
+    physical_cash, difference, denominations_json, sync_snapshot_at, note, report_status
+  )
+  values (
+    v_count.business_date, v_count.id, v_count.counted_at, auth.uid(),
+    v_pos_total, v_opening, v_pos_cash, v_pos_non_cash, v_bank_transfer,
+    v_expense, v_payroll, v_theory_cash, v_reconciliation,
+    v_count.total_physical, v_difference, v_count.denominations_json,
+    nullif(v_theory->>'sync_snapshot_at','')::timestamptz, v_count.note, 'final'
+  )
+  on conflict (cash_count_id) do update set
+    closed_at = excluded.closed_at,
+    closed_by = excluded.closed_by,
+    pos_total = excluded.pos_total,
+    opening_cash = excluded.opening_cash,
+    pos_cash_total = excluded.pos_cash_total,
+    pos_non_cash_total = excluded.pos_non_cash_total,
+    bank_transfer_confirmed = excluded.bank_transfer_confirmed,
+    expense_cash_total = excluded.expense_cash_total,
+    payroll_cash_total = excluded.payroll_cash_total,
+    theory_cash = excluded.theory_cash,
+    reconciliation_total = excluded.reconciliation_total,
+    physical_cash = excluded.physical_cash,
+    difference = excluded.difference,
+    denominations_json = excluded.denominations_json,
+    sync_snapshot_at = excluded.sync_snapshot_at,
+    note = excluded.note,
+    report_status = 'final'
+  returning id into v_report_id;
+
+  return jsonb_build_object('report_id', v_report_id, 'status', 'final');
+end;
+$$;
+
+create or replace function public.void_cash_close_report(p_report_id uuid, p_reason text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+begin
+  if not public.app_is_owner_manager() then raise exception 'Chỉ owner/manager được hủy báo cáo chốt két.'; end if;
+  update public.cash_close_reports set report_status = 'voided', void_reason = p_reason, voided_by = auth.uid(), voided_at = now() where id = p_report_id;
+  return jsonb_build_object('report_id', p_report_id, 'status', 'voided');
+end;
+$$;
+
+create or replace function public.get_cash_close_report(p_report_id uuid)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public, auth
+as $$
+  select to_jsonb(r) from public.daily_cash_close_report_view r where r.id = p_report_id and (public.app_is_owner_manager() or public.app_role() = 'staff_operator');
+$$;
+
+create or replace function public.get_cash_close_reports_by_date(p_business_date date)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public, auth
+as $$
+  select coalesce(jsonb_agg(to_jsonb(r) order by r.closed_at desc), '[]'::jsonb)
+  from public.daily_cash_close_report_view r
+  where r.business_date = p_business_date and (public.app_is_owner_manager() or public.app_role() = 'staff_operator');
+$$;
+
+create or replace function public.ingest_kiotviet_batch(p_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_client_id text := p_payload->>'client_id';
+  v_client_secret text := p_payload->>'client_secret';
+  v_client uuid;
+  v_batch text := coalesce(p_payload->>'batch_id', gen_random_uuid()::text);
+  v_run_id uuid;
+  v_order jsonb;
+  v_item jsonb;
+  v_payment jsonb;
+  v_order_id uuid;
+  v_payment_id uuid;
+  v_order_key text;
+  v_idx integer;
+  v_orders integer := 0;
+  v_items integer := 0;
+  v_payments integer := 0;
+  v_payment_method text;
+  v_payment_amount numeric(14,2);
+  v_cash_received numeric(14,2);
+  v_change_given numeric(14,2);
+  v_gross numeric(14,2);
+  v_discount numeric(14,2);
+  v_net numeric(14,2);
+  v_total_payment numeric(14,2);
+  v_qty numeric;
+  v_price numeric;
+  v_item_disc numeric;
+  v_line_total numeric;
+  v_max_amount constant numeric := 1000000000;
+  v_max_qty constant numeric := 9999;
+begin
+  select id into v_client from public.integration_clients
+  where client_id = v_client_id
+    and is_active = true
+    and client_secret_hash = crypt(v_client_secret, client_secret_hash)
+  limit 1;
+  if v_client is null then raise exception 'Integration client không hợp lệ.'; end if;
+
+  update public.integration_clients set last_used_at = now() where id = v_client;
+
+  insert into public.sales_sync_runs (batch_id, source, status, started_at, finished_at, business_date_from, business_date_to, raw_json)
+  values (v_batch, coalesce(p_payload->>'source','kiotviet'), 'running', coalesce((p_payload->>'started_at')::timestamptz, now()), null, nullif(p_payload->>'business_date_from','')::date, nullif(p_payload->>'business_date_to','')::date, p_payload)
+  on conflict (batch_id) do update set status = 'running', started_at = excluded.started_at, raw_json = excluded.raw_json
+  returning id into v_run_id;
+
+  for v_order in select * from jsonb_array_elements(coalesce(p_payload->'orders','[]'::jsonb)) loop
+    v_order_key := coalesce(nullif(v_order->>'kiotviet_invoice_id',''), nullif(v_order->>'kiotviet_id',''), nullif(v_order->>'id',''), nullif(v_order->>'invoiceId',''), nullif(v_order->>'invoice_code',''), gen_random_uuid()::text);
+
+    v_gross := coalesce(nullif(v_order->>'gross_amount','')::numeric, 0);
+    v_discount := coalesce(nullif(v_order->>'discount_amount','')::numeric, 0);
+    v_net := coalesce(nullif(v_order->>'net_amount','')::numeric, coalesce(nullif(v_order->>'total_payment','')::numeric, 0));
+    v_total_payment := coalesce(nullif(v_order->>'total_payment','')::numeric, coalesce(nullif(v_order->>'net_amount','')::numeric, 0));
+    if v_gross < 0 or v_discount < 0 or v_net < 0 or v_total_payment < 0 then
+      raise exception 'ingest_kiotviet_batch: số tiền âm tại order=%', v_order_key;
+    end if;
+    if v_gross > v_max_amount or v_net > v_max_amount or v_total_payment > v_max_amount then
+      raise exception 'ingest_kiotviet_batch: số tiền vượt ngưỡng (>%) tại order=%', v_max_amount, v_order_key;
+    end if;
+
+    insert into public.sales_orders (
+      kiotviet_invoice_id, invoice_uuid, invoice_code, kiotviet_order_id, order_uuid, table_or_order_code,
+      purchase_at, business_date, branch_id, branch_name, sold_by_id, sold_by_name, customer_code, customer_name,
+      gross_amount, discount_amount, net_amount, total_payment, status_code, status_value, using_cod, source_created_at, sync_run_id, raw_json
+    ) values (
+      v_order_key,
+      nullif(v_order->>'invoice_uuid',''),
+      coalesce(v_order->>'invoice_code', v_order->>'code'),
+      nullif(v_order->>'kiotviet_order_id',''),
+      nullif(v_order->>'order_uuid',''),
+      coalesce(v_order->>'table_or_order_code', v_order->>'order_code'),
+      coalesce(nullif(v_order->>'purchase_at','')::timestamptz, now()),
+      coalesce(nullif(v_order->>'business_date','')::date, coalesce(nullif(v_order->>'purchase_at','')::timestamptz, now())::date),
+      nullif(v_order->>'branch_id',''),
+      v_order->>'branch_name',
+      nullif(v_order->>'sold_by_id',''),
+      v_order->>'sold_by_name',
+      v_order->>'customer_code',
+      v_order->>'customer_name',
+      v_gross,
+      v_discount,
+      v_net,
+      v_total_payment,
+      v_order->>'status_code',
+      v_order->>'status_value',
+      nullif(v_order->>'using_cod','')::boolean,
+      nullif(v_order->>'source_created_at','')::timestamptz,
+      v_run_id,
+      v_order
+    )
+    on conflict (kiotviet_invoice_id) do update set
+      invoice_uuid = excluded.invoice_uuid,
+      invoice_code = excluded.invoice_code,
+      kiotviet_order_id = excluded.kiotviet_order_id,
+      order_uuid = excluded.order_uuid,
+      table_or_order_code = excluded.table_or_order_code,
+      purchase_at = excluded.purchase_at,
+      business_date = excluded.business_date,
+      branch_id = excluded.branch_id,
+      branch_name = excluded.branch_name,
+      sold_by_id = excluded.sold_by_id,
+      sold_by_name = excluded.sold_by_name,
+      customer_code = excluded.customer_code,
+      customer_name = excluded.customer_name,
+      gross_amount = excluded.gross_amount,
+      discount_amount = excluded.discount_amount,
+      net_amount = excluded.net_amount,
+      total_payment = excluded.total_payment,
+      status_code = excluded.status_code,
+      status_value = excluded.status_value,
+      using_cod = excluded.using_cod,
+      source_created_at = excluded.source_created_at,
+      sync_run_id = excluded.sync_run_id,
+      raw_json = excluded.raw_json
+    returning id into v_order_id;
+
+    delete from public.sales_order_items where sales_order_id = v_order_id;
+    delete from public.cash_drawer_events where sales_order_id = v_order_id and source = 'pos_sync';
+    delete from public.sales_payments where sales_order_id = v_order_id;
+
+    v_idx := 0;
+    for v_item in select * from jsonb_array_elements(coalesce(v_order->'invoice_details', v_order->'items', '[]'::jsonb)) loop
+      v_qty := coalesce(nullif(v_item->>'quantity','')::numeric, 0);
+      v_price := coalesce(nullif(v_item->>'unit_price','')::numeric, 0);
+      v_item_disc := coalesce(nullif(v_item->>'discount_amount','')::numeric, 0);
+      v_line_total := coalesce(nullif(v_item->>'line_total','')::numeric, v_qty * v_price);
+      if v_qty < 0 or v_price < 0 or v_item_disc < 0 or v_line_total < 0 then
+        raise exception 'ingest_kiotviet_batch: numeric âm tại order=% item=%', v_order_key, v_idx;
+      end if;
+      if v_qty > v_max_qty or v_price > v_max_amount or v_line_total > v_max_amount then
+        raise exception 'ingest_kiotviet_batch: vượt ngưỡng tại order=% item=%', v_order_key, v_idx;
+      end if;
+
+      insert into public.sales_order_items (sales_order_id, line_index, item_key, product_id, product_code, product_name, quantity, unit_price, discount_amount, discount_ratio, line_total, note, return_quantity, category_name, raw_json)
+      values (
+        v_order_id,
+        v_idx,
+        coalesce(nullif(v_item->>'item_key',''), nullif(v_item->>'id',''), coalesce(v_item->>'product_id','product') || '-' || v_idx::text),
+        nullif(v_item->>'product_id',''),
+        nullif(v_item->>'product_code',''),
+        coalesce(v_item->>'product_name', v_item->>'name', 'Sản phẩm'),
+        v_qty,
+        v_price,
+        v_item_disc,
+        coalesce(nullif(v_item->>'discount_ratio','')::numeric, 0),
+        v_line_total,
+        v_item->>'note',
+        coalesce(nullif(v_item->>'return_quantity','')::numeric, 0),
+        v_item->>'category_name',
+        v_item
+      );
+      v_idx := v_idx + 1;
+      v_items := v_items + 1;
+    end loop;
+
+    for v_payment in select * from jsonb_array_elements(coalesce(v_order->'payments', jsonb_build_array(jsonb_build_object('payment_method', coalesce(v_order->>'payment_method', case when coalesce(nullif(v_order->>'using_cod','')::boolean, false) then 'cash' else 'unknown' end), 'amount', coalesce(v_order->>'total_payment', v_order->>'net_amount'))))) loop
+      v_payment_method := lower(coalesce(v_payment->>'payment_method', v_payment->>'method', 'unknown'));
+      v_payment_amount := coalesce(nullif(v_payment->>'amount','')::numeric, 0);
+      v_cash_received := nullif(v_payment->>'cash_received','')::numeric;
+      v_change_given := nullif(v_payment->>'change_given','')::numeric;
+      if v_payment_amount < 0 or coalesce(v_cash_received, 0) < 0 or coalesce(v_change_given, 0) < 0 then
+        raise exception 'ingest_kiotviet_batch: payment âm tại order=%', v_order_key;
+      end if;
+      if v_payment_amount > v_max_amount
+         or coalesce(v_cash_received, 0) > v_max_amount
+         or coalesce(v_change_given, 0) > v_max_amount then
+        raise exception 'ingest_kiotviet_batch: payment vượt ngưỡng tại order=%', v_order_key;
+      end if;
+      if v_payment_method = 'cash'
+         and v_cash_received is not null
+         and v_cash_received < v_payment_amount then
+        raise exception 'ingest_kiotviet_batch: cash_received (%) < amount (%) tại order=%', v_cash_received, v_payment_amount, v_order_key;
+      end if;
+
+      insert into public.sales_payments (sales_order_id, payment_method, amount, cash_received, change_given, payment_time, source, confidence, raw_json)
+      values (v_order_id, v_payment_method, v_payment_amount, v_cash_received, v_change_given, coalesce(nullif(v_payment->>'payment_time','')::timestamptz, (v_order->>'purchase_at')::timestamptz, now()), coalesce(v_payment->>'source','kiotviet'), coalesce(v_payment->>'confidence', case when v_payment ? 'amount' then 'exact' else 'derived' end), v_payment)
+      returning id into v_payment_id;
+
+      if v_payment_method = 'cash' then
+        if v_cash_received is not null and v_change_given is not null then
+          insert into public.cash_drawer_events (business_date, occurred_at, event_type, direction, amount, sales_order_id, sales_payment_id, source, note, raw_json)
+          select business_date, purchase_at, 'customer_cash_received', 'in', v_cash_received, id, v_payment_id, 'pos_sync', invoice_code, v_payment from public.sales_orders where id = v_order_id;
+          if v_change_given > 0 then
+            insert into public.cash_drawer_events (business_date, occurred_at, event_type, direction, amount, sales_order_id, sales_payment_id, source, note, raw_json)
+            select business_date, purchase_at, 'change_given', 'out', v_change_given, id, v_payment_id, 'pos_sync', invoice_code, v_payment from public.sales_orders where id = v_order_id;
+          end if;
+        else
+          insert into public.cash_drawer_events (business_date, occurred_at, event_type, direction, amount, sales_order_id, sales_payment_id, source, note, raw_json)
+          select business_date, purchase_at, 'pos_cash_in', 'in', v_payment_amount, id, v_payment_id, 'pos_sync', invoice_code, v_payment from public.sales_orders where id = v_order_id;
+        end if;
+      end if;
+      v_payments := v_payments + 1;
+    end loop;
+
+    v_orders := v_orders + 1;
+  end loop;
+
+  update public.sales_sync_runs set status = 'success', finished_at = now(), order_count = v_orders, item_count = v_items, payment_count = v_payments where id = v_run_id;
+  return jsonb_build_object('run_id', v_run_id, 'inserted_or_updated_orders', v_orders, 'items', v_items, 'payments', v_payments, 'status', 'success');
+end;
+$$;
+
+create or replace function public.handover_session_payload(p_session_id uuid)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public, auth
+as $$
+  select jsonb_build_object(
+    'id', s.id,
+    'business_date', s.business_date,
+    'status', s.status,
+    'note', s.note,
+    'created_by', s.created_by,
+    'created_at', s.created_at,
+    'completed_at', s.completed_at,
+    'tasks', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'id', t.id,
+        'task_key', t.task_key,
+        'label', t.label,
+        'is_done', t.is_done,
+        'checked_by', t.checked_by,
+        'checked_at', t.checked_at,
+        'sort_order', t.sort_order
+      ) order by t.sort_order, t.created_at)
+      from public.handover_tasks t
+      where t.session_id = s.id
+    ), '[]'::jsonb)
+  )
+  from public.handover_sessions s
+  where s.id = p_session_id;
+$$;
+
+create or replace function public.get_or_create_handover_session(p_business_date date)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_session_id uuid;
+  v_task jsonb;
+  v_tasks jsonb := coalesce((select value from public.app_settings where key = 'handover_default_tasks'), '[{"key":"clean_counter","label":"Đã vệ sinh quầy và máy pha"},{"key":"restock","label":"Đã kiểm tra nguyên liệu cần bổ sung"},{"key":"cash_ready","label":"Đã chuẩn bị tiền lẻ/két cho ca sau"},{"key":"handover_note","label":"Đã ghi chú bàn giao cho ca sau"}]'::jsonb);
+  v_sort integer := 10;
+begin
+  if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền xem sổ bàn giao.'; end if;
+
+  insert into public.handover_sessions (business_date, created_by)
+  values (p_business_date, auth.uid())
+  on conflict (business_date) do update set business_date = excluded.business_date
+  returning id into v_session_id;
+
+  if not exists (select 1 from public.handover_tasks where session_id = v_session_id) then
+    for v_task in select * from jsonb_array_elements(v_tasks) loop
+      insert into public.handover_tasks (session_id, task_key, label, sort_order)
+      values (v_session_id, coalesce(v_task->>'key', 'task_' || v_sort::text), coalesce(v_task->>'label', 'Việc cần làm'), v_sort)
+      on conflict (session_id, task_key) do nothing;
+      v_sort := v_sort + 10;
+    end loop;
+  end if;
+
+  return public.handover_session_payload(v_session_id);
+end;
+$$;
+
+create or replace function public.update_handover_task(p_task_id uuid, p_is_done boolean)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_session_id uuid;
+begin
+  if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền cập nhật checklist bàn giao.'; end if;
+
+  update public.handover_tasks
+  set is_done = p_is_done,
+      checked_by = case when p_is_done then auth.uid() else null end,
+      checked_at = case when p_is_done then now() else null end
+  where id = p_task_id
+  returning session_id into v_session_id;
+
+  if v_session_id is null then raise exception 'Không tìm thấy checklist bàn giao.'; end if;
+  return public.handover_session_payload(v_session_id);
+end;
+$$;
+
+create or replace function public.update_handover_note(p_session_id uuid, p_note text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+begin
+  if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền cập nhật ghi chú bàn giao.'; end if;
+  update public.handover_sessions set note = p_note where id = p_session_id;
+  return public.handover_session_payload(p_session_id);
+end;
+$$;
+
+create or replace function public.complete_handover_session(p_session_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+begin
+  if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền hoàn tất bàn giao.'; end if;
+  update public.handover_sessions set status = 'completed', completed_at = now() where id = p_session_id;
+  return public.handover_session_payload(p_session_id);
+end;
+$$;
+
+-- Audit log trigger function: capture INSERT/UPDATE/DELETE on sensitive tables.
+create or replace function public._audit_row_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_action text;
+  v_entity_id uuid;
+  v_diff jsonb;
+begin
+  v_action := tg_table_name || '.' || lower(tg_op);
+  v_entity_id := case
+    when tg_op = 'DELETE' then (to_jsonb(old)->>'id')::uuid
+    else (to_jsonb(new)->>'id')::uuid
+  end;
+  v_diff := case
+    when tg_op = 'UPDATE' then jsonb_build_object('before', to_jsonb(old), 'after', to_jsonb(new))
+    when tg_op = 'INSERT' then jsonb_build_object('after', to_jsonb(new))
+    else jsonb_build_object('before', to_jsonb(old))
+  end;
+  insert into public.audit_log(actor_user_id, actor_role, action, entity_type, entity_id, diff_json)
+  values (auth.uid(), public.app_role(), v_action, tg_table_name, v_entity_id, v_diff);
+  return coalesce(new, old);
+end;
+$$;
+
+drop trigger if exists audit_payroll on public.shift_payroll_records;
+create trigger audit_payroll
+  after insert or update or delete on public.shift_payroll_records
+  for each row execute function public._audit_row_change();
+
+drop trigger if exists audit_cash_close on public.cash_close_reports;
+create trigger audit_cash_close
+  after insert or update or delete on public.cash_close_reports
+  for each row execute function public._audit_row_change();
+
+drop trigger if exists audit_expenses on public.expenses;
+create trigger audit_expenses
+  after insert or update or delete on public.expenses
+  for each row execute function public._audit_row_change();
+
+drop trigger if exists audit_cash_opening on public.cash_day_openings;
+create trigger audit_cash_opening
+  after insert or update or delete on public.cash_day_openings
+  for each row execute function public._audit_row_change();
+
+drop trigger if exists audit_app_settings on public.app_settings;
+create trigger audit_app_settings
+  after update on public.app_settings
+  for each row execute function public._audit_row_change();
+
+drop trigger if exists audit_employees on public.employees;
+create trigger audit_employees
+  after update or delete on public.employees
+  for each row execute function public._audit_row_change();
+
+drop trigger if exists audit_employee_accounts on public.employee_accounts;
+create trigger audit_employee_accounts
+  after insert or update or delete on public.employee_accounts
+  for each row execute function public._audit_row_change();
+
+drop trigger if exists audit_integration_clients on public.integration_clients;
+create trigger audit_integration_clients
+  after insert or update or delete on public.integration_clients
+  for each row execute function public._audit_row_change();

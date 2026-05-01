@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(git -C \"F:/Chill manager\" status --short)",
+      "Bash(git -C \"F:/Chill manager\" ls-remote --heads origin)",
+      "Bash(git -C \"F:/Chill manager\" log --oneline)",
+      "Bash(git -C \"F:/Chill manager\" ls-files --others --exclude-standard --directory v2)",
+      "Bash(git -C \"F:/Chill manager\" ls-files --others --exclude-standard \"Test folder/v2\")"
+    ]
+  }
+}
