@@ -518,11 +518,11 @@ th { color: #7a5941; font-size: 12px; text-transform: uppercase; }
 .iconOnlyButton, .primaryIconButton { width: 42px; height: 42px; border-radius: 14px; border: 1px solid var(--line); display: inline-grid; place-items: center; background: #fff8ef; color: var(--accent-dark); font-weight: 800; line-height: 1; }
 .primaryIconButton { background: var(--accent); color: #fff; border-color: var(--accent); font-size: 22px; }
 .expenseGridTwo { grid-template-columns: minmax(0, 1fr) 340px; }
-.formulaCard { border: 1px solid #ffd3a2; border-radius: 16px; background: #fff7ed; padding: 12px; display: grid; gap: 8px; margin: 12px 0; }
+.formulaCard { border: 1px solid #ffd3a2; border-radius: 16px; background: #fff7ed; padding: 12px; display: grid; gap: 8px; margin: 12px 0; min-width: 0; max-width: 100%; }
 .formulaCard .eyebrow { margin: 0; }
-.formulaCard small { color: var(--muted); line-height: 1.45; }
-.formulaExpression { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
-.formulaExpression strong, .formulaExpression span { white-space: nowrap; }
+.formulaCard small { color: var(--muted); line-height: 1.45; word-wrap: break-word; }
+.formulaExpression { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: clamp(11px, 2.4vw, 13px); min-width: 0; max-width: 100%; }
+.formulaExpression strong, .formulaExpression span { white-space: normal; word-break: break-word; max-width: 100%; }
 .formulaExpression span { border-radius: 999px; background: #fffdfa; border: 1px solid var(--line); padding: 6px 8px; }
 .settingsWorkspace { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(340px, .85fr); gap: 18px; align-items: start; }
 .settingsCard.wide { grid-column: 1 / -1; }
@@ -574,7 +574,7 @@ th { color: #7a5941; font-size: 12px; text-transform: uppercase; }
 .webhookUrlRow input { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; background: #f8f4ec; }
 
 @media (max-width: 1180px) { .settingsWorkspace, .expenseGridTwo { grid-template-columns: 1fr; } .settingsCard.wide { grid-column: auto; } .settingsAccountRow { grid-template-columns: 1fr; } }
-@media (max-width: 760px) { .loadingCard, .loadingCards { grid-template-columns: 1fr; } .loadingLogo { width: 92px; } .formulaExpression { align-items: stretch; } .formulaExpression span, .formulaExpression strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; } .openingCashCard { align-items: stretch; flex-direction: column; } .openingCashCard .primaryButton, .openingCashCard .ghostButton { width: 100%; } }
+@media (max-width: 760px) { .loadingCard, .loadingCards { grid-template-columns: 1fr; } .loadingLogo { width: 92px; } .formulaExpression { flex-direction: column; align-items: flex-start; gap: 4px; } .formulaExpression span, .formulaExpression strong { max-width: 100%; white-space: normal; word-break: break-word; } .formulaCard small { font-size: 11px; } .openingCashCard { align-items: stretch; flex-direction: column; } .openingCashCard .primaryButton, .openingCashCard .ghostButton { width: 100%; } }
 
 /* Responsive navigation and overflow fixes */
 .pageTitleGroup {
