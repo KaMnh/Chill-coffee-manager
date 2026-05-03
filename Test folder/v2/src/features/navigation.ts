@@ -1,15 +1,25 @@
+import type { LucideIcon } from "lucide-react";
+import {
+  BarChart3,
+  Banknote,
+  FileText,
+  LayoutDashboard,
+  Settings,
+  Users,
+  Wallet
+} from "@/shared/icons";
 import type { Account, AppSettings, UserRole } from "@/lib/types";
 
 export type ViewKey = "dashboard" | "expenses" | "shifts" | "cash" | "reports" | "pivot" | "settings";
 
-export const NAV_ITEMS: Array<{ key: ViewKey; label: string; roles: UserRole[] }> = [
-  { key: "dashboard", label: "Bảng vận hành", roles: ["owner", "manager", "staff_operator", "employee_viewer"] },
-  { key: "expenses", label: "Chi phí", roles: ["owner", "manager", "staff_operator"] },
-  { key: "shifts", label: "Ca & lương", roles: ["owner", "manager", "staff_operator"] },
-  { key: "cash", label: "Chốt két", roles: ["owner", "manager", "staff_operator"] },
-  { key: "reports", label: "Báo cáo chốt két", roles: ["owner", "manager", "staff_operator"] },
-  { key: "pivot", label: "Pivot", roles: ["owner", "manager"] },
-  { key: "settings", label: "Thiết lập", roles: ["owner", "manager"] }
+export const NAV_ITEMS: Array<{ key: ViewKey; label: string; icon: LucideIcon; roles: UserRole[] }> = [
+  { key: "dashboard", label: "Bảng vận hành", icon: LayoutDashboard, roles: ["owner", "manager", "staff_operator", "employee_viewer"] },
+  { key: "expenses", label: "Chi phí", icon: Wallet, roles: ["owner", "manager", "staff_operator"] },
+  { key: "shifts", label: "Ca & lương", icon: Users, roles: ["owner", "manager", "staff_operator"] },
+  { key: "cash", label: "Chốt két", icon: Banknote, roles: ["owner", "manager", "staff_operator"] },
+  { key: "reports", label: "Báo cáo chốt két", icon: FileText, roles: ["owner", "manager", "staff_operator"] },
+  { key: "pivot", label: "Pivot", icon: BarChart3, roles: ["owner", "manager"] },
+  { key: "settings", label: "Thiết lập", icon: Settings, roles: ["owner", "manager"] }
 ];
 
 export const DEFAULT_SIDEBAR_BY_ROLE: Record<UserRole, ViewKey[]> = {

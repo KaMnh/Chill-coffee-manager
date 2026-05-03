@@ -39,6 +39,7 @@ const ReportsPanel = dynamic(
   { ssr: false }
 );
 import { NAV_ITEMS, canSee, getVisibleNav, type ViewKey } from "@/features/navigation";
+import { LogOut, Menu, RefreshCw } from "@/shared/icons";
 import { useSupabase } from "@/hooks/use-supabase";
 import {
   queryKeys,
@@ -337,22 +338,29 @@ export default function Home() {
           <span>Operations v2</span>
         </div>
         <nav className="navList">
-          {visibleNav.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              className={"navButton " + (activeView === item.key ? "active" : "")}
-              onClick={() => handleSelectView(item.key)}
-            >
-              {item.label}
-            </button>
-          ))}
+          {visibleNav.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                aria-label={item.label}
+                title={item.label}
+                className={"navButton " + (activeView === item.key ? "active" : "")}
+                onClick={() => handleSelectView(item.key)}
+              >
+                <Icon size={18} aria-hidden="true" />
+                <span className="iconLabel">{item.label}</span>
+              </button>
+            );
+          })}
         </nav>
         <div className="accountBox">
           <strong>{account.employee?.name ?? "Người dùng"}</strong>
           <span>{account.role}</span>
           <button className="iconButton" type="button" onClick={() => supabase.auth.signOut()}>
-            Đăng xuất
+            <LogOut size={14} aria-hidden="true" />
+            <span className="iconLabel"> Đăng xuất</span>
           </button>
         </div>
       </aside>
@@ -361,7 +369,7 @@ export default function Home() {
         <header className="pageHeader">
           <div className="pageTitleGroup">
             <button className="mobileMenuButton" type="button" aria-label="Mở menu" onClick={() => setNavOpen(true)}>
-              ☰
+              <Menu size={22} aria-hidden="true" />
             </button>
             <div>
               <h1>{activeLabel}</h1>
@@ -374,9 +382,12 @@ export default function Home() {
               className="ghostButton"
               type="button"
               disabled={isSyncingPos}
+              aria-label={isSyncingPos ? "Đang sync POS" : "Làm mới"}
+              title={isSyncingPos ? "Đang sync POS" : "Làm mới"}
               onClick={() => requestPosSync(true, "manual_refresh")}
             >
-              {isSyncingPos ? "Đang sync POS..." : "Làm mới"}
+              <RefreshCw size={16} aria-hidden="true" className={isSyncingPos ? "spinning" : ""} />
+              <span className="iconLabel">{isSyncingPos ? " Đang sync POS..." : " Làm mới"}</span>
             </button>
           </div>
         </header>

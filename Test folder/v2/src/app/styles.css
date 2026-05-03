@@ -31,8 +31,15 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .brandBlock strong { font-size: 20px; }
 .brandBlock span, .accountBox span, .muted { color: var(--muted); }
 .navList { display: grid; gap: 8px; margin-top: 8px; }
-.navButton { border: 0; border-radius: 12px; padding: 12px 14px; background: transparent; text-align: left; color: var(--ink); }
+.navButton { border: 0; border-radius: 12px; padding: 12px 14px; background: transparent; text-align: left; color: var(--ink); display: flex; align-items: center; gap: 12px; font-weight: 500; }
+.navButton svg { flex-shrink: 0; opacity: 0.85; }
 .navButton.active, .navButton:hover { background: #fff0df; color: var(--accent-dark); }
+.navButton.active svg, .navButton:hover svg { opacity: 1; }
+.iconLabel { font-weight: inherit; }
+
+/* Spinning icon (e.g. refresh button while syncing) */
+@keyframes spinIcon { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.spinning { animation: spinIcon 1.2s linear infinite; }
 .accountBox { margin-top: auto; border: 1px solid var(--line); border-radius: 14px; padding: 12px; display: grid; gap: 6px; background: var(--panel); }
 .iconButton { border: 0; background: transparent; color: var(--accent-dark); text-align: left; padding: 0; }
 
@@ -170,6 +177,12 @@ th { color: #7a5941; font-size: 12px; text-transform: uppercase; }
   .mainPanel { padding: 18px; }
   .pageHeader, .panelHeader { flex-direction: column; }
   .metricsGrid, .formGrid2, .formGrid3, .calcGrid, .miniGrid { grid-template-columns: 1fr; }
+  /* Mobile: hide text labels next to icons in tight buttons */
+  .headerActions .ghostButton .iconLabel,
+  .headerActions .primaryButton .iconLabel,
+  .actionIconLabel { display: none; }
+  .headerActions .ghostButton,
+  .headerActions .primaryButton { padding: 12px; }
   .employeeRow, .denominationRow { grid-template-columns: 1fr; }
 }
 
