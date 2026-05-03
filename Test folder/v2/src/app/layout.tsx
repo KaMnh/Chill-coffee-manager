@@ -4,7 +4,7 @@ import { Providers } from "./providers";
 
 export const metadata: Metadata = {
   title: "Chill Manager v2",
-  description: "Frontend-only operations dashboard for Chill Coffee Garden"
+  description: "Hệ thống quản lý vận hành Chill Coffee Garden"
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

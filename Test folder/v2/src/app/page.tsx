@@ -364,11 +364,7 @@ export default function Home() {
               ☰
             </button>
             <div>
-              <p className="eyebrow">Trạm điều phối dữ liệu</p>
               <h1>{activeLabel}</h1>
-              <p className="muted">
-                Frontend-only, Supabase RLS là lớp bảo mật chính. Không dùng service role trong app.
-              </p>
               {isRefreshing && <span className="refreshPill">Đang cập nhật dữ liệu...</span>}
             </div>
           </div>
