@@ -561,6 +561,24 @@ th { color: #7a5941; font-size: 12px; text-transform: uppercase; }
 .checklistEditorRows { display: grid; gap: 10px; }
 .checklistEditRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
 
+/* Template admin table (Settings → Mẫu chi phí nhanh) */
+.templateCreateForm { display: grid; gap: 12px; padding: 14px; background: #fffaf2; border: 1px dashed var(--line); border-radius: 12px; margin-top: 12px; }
+.templateAdminTable { margin-top: 12px; }
+.templateAdminTable input, .templateAdminTable select { font-size: 13px; padding: 8px 10px; }
+.templateAdminTable td { vertical-align: middle; }
+.templateAdminTable .inactiveRow { opacity: 0.55; }
+.templateAdminTable .editingRow { background: #fff7ed; }
+.rowActions { display: flex; gap: 6px; justify-content: flex-end; }
+/* Compact icon button for table row actions (smaller than .iconOnlyButton 42px) */
+.compactIconButton { width: 36px; height: 36px; padding: 0; display: grid; place-items: center; border-radius: 10px; border: 1px solid transparent; cursor: pointer; }
+.compactIconButton.primary { background: var(--accent); color: white; }
+.compactIconButton.primary:hover { background: var(--accent-dark); }
+.compactIconButton.ghost { background: #fff1e2; color: var(--accent-dark); }
+.compactIconButton.ghost:hover { border-color: var(--line); }
+.compactIconButton:disabled { opacity: 0.4; cursor: not-allowed; }
+.badgeButton { background: transparent; border: 0; padding: 0; cursor: pointer; }
+.badgeButton:disabled { cursor: not-allowed; opacity: 0.6; }
+
 /* KiotViet Settings */
 .kiotvietForm { display: grid; gap: 14px; margin-top: 14px; }
 .kiotvietForm .fieldStack { gap: 6px; }
