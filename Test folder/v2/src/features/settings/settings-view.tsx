@@ -6,6 +6,7 @@ import { formatVND } from "@/lib/format";
 import type { Account, AppSettings, SettingsAccount, UserRole } from "@/lib/types";
 import { EmptyState, type Notice } from "@/shared";
 import { NAV_ITEMS, ROLE_LABELS, hasBasePageAccess, normalizeSidebarItems, type ViewKey } from "../navigation";
+import { KiotvietSettings } from "./kiotviet-settings";
 
 export function SettingsView({
   supabase,
@@ -180,14 +181,7 @@ export function SettingsView({
           <strong>Tổng POS - đối soát</strong>
         </div>
       </section>
-      <section className="panel settingsCard">
-        <p className="eyebrow">POS / n8n</p>
-        <h2>Luồng đồng bộ</h2>
-        <p className="muted">
-          Frontend gọi Supabase Edge Function trigger-pos-sync. Secret webhook chỉ nằm trong Edge Function/n8n, không nằm
-          trong trình duyệt.
-        </p>
-      </section>
+      <KiotvietSettings supabase={supabase} onNotice={onNotice} />
     </div>
   );
 }

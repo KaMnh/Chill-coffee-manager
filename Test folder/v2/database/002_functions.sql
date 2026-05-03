@@ -1,4 +1,22 @@
-﻿-- Chill Manager v2 - Views and RPC functions
+﻿-- =============================================================================
+-- Chill Manager v2 — RPC functions + audit triggers
+-- Apply order: 001 → 002 → 003 → 004
+-- Fully idempotent — re-run an toàn (functions: create or replace; triggers: drop if exists).
+-- Bao gồm:
+--   - Auth helpers: app_role, app_is_owner_manager, app_is_staff_or_above
+--   - Cash flow: compute_cash_theory, save_cash_day_opening, save_cash_count,
+--     finalize_cash_close_report, void_cash_close_report, list_cash_counts,
+--     get_cash_close_report, get_cash_close_reports_by_date
+--   - Dashboard: dashboard_daily_ops
+--   - Expenses: create_expense, create_expense_template
+--   - Shifts: check_in_employee, check_out_employee, edit_shift_payroll_record
+--   - POS sync: ingest_kiotviet_batch, get_last_sync_cursor
+--   - Handover: get_or_create_handover_session, update_handover_task,
+--     update_handover_note, complete_handover_session,
+--     update_handover_default_tasks, update_handover_session_tasks
+--   - Settings: update_sidebar_defaults, update_user_sidebar_config
+--   - Audit: _audit_row_change + 8 trigger audit_*
+-- =============================================================================
 
 create or replace function public.app_role()
 returns text
@@ -613,9 +631,15 @@ begin
 
   v_theory := public.compute_cash_theory(v_date, v_counted_at, v_bank_transfer);
   v_theory_cash := (v_theory->>'theory_cash')::numeric;
-  v_pos_total := (v_theory->>'pos_total')::numeric;
-  v_pos_cash := (v_theory->>'pos_cash_total')::numeric;
-  v_pos_non_cash := (v_theory->>'pos_non_cash_total')::numeric;
+  -- Manual POS override: nếu nhân viên nhập tay (POS không sync được, không kết nối...)
+  -- thì ưu tiên giá trị từ payload. Validate: phải >= 0 và <= 1B VND.
+  v_pos_total := coalesce(nullif(p_payload->>'pos_total','')::numeric, (v_theory->>'pos_total')::numeric);
+  v_pos_cash := coalesce(nullif(p_payload->>'pos_cash_total','')::numeric, (v_theory->>'pos_cash_total')::numeric);
+  v_pos_non_cash := coalesce(nullif(p_payload->>'pos_non_cash_total','')::numeric, (v_theory->>'pos_non_cash_total')::numeric);
+  if v_pos_total < 0 or v_pos_cash < 0 or v_pos_non_cash < 0
+     or v_pos_total > 1000000000 or v_pos_cash > 1000000000 or v_pos_non_cash > 1000000000 then
+    raise exception 'POS manual override: giá trị không hợp lệ (phải 0–1.000.000.000).';
+  end if;
   v_opening := (v_theory->>'opening_cash')::numeric;
   v_expense := (v_theory->>'expense_cash_total')::numeric;
   v_payroll := (v_theory->>'payroll_cash_total')::numeric;
@@ -724,6 +748,52 @@ begin
   return jsonb_build_object('report_id', p_report_id, 'status', 'voided');
 end;
 $$;
+
+create or replace function public.list_cash_counts(p_business_date date)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_result jsonb;
+begin
+  -- Reuse RLS contract: staff_or_above mới được xem lịch sử kiểm két.
+  if not public.app_is_staff_or_above() then
+    raise exception 'Bạn không có quyền xem lịch sử kiểm két.';
+  end if;
+
+  select coalesce(jsonb_agg(item order by item->>'counted_at' desc), '[]'::jsonb)
+  into v_result
+  from (
+    select jsonb_build_object(
+      'id', cc.id,
+      'business_date', cc.business_date,
+      'count_type', cc.count_type,
+      'counted_at', cc.counted_at,
+      'total_physical', cc.total_physical,
+      'total_theory', cc.total_theory,
+      'difference', cc.difference,
+      'pos_total', cc.pos_total,
+      'pos_cash_total', cc.pos_cash_total,
+      'pos_non_cash_total', cc.pos_non_cash_total,
+      'opening_cash', cc.opening_cash,
+      'bank_transfer_confirmed', cc.bank_transfer_confirmed,
+      'reconciliation_total', cc.reconciliation_total,
+      'denominations_json', cc.denominations_json,
+      'note', cc.note,
+      'report_id', ccr.id,
+      'report_status', ccr.report_status
+    ) as item
+    from public.cash_counts cc
+    left join public.cash_close_reports ccr on ccr.cash_count_id = cc.id
+    where cc.business_date = p_business_date
+  ) sub;
+
+  return v_result;
+end$$;
+
+grant execute on function public.list_cash_counts(date) to authenticated;
 
 create or replace function public.get_cash_close_report(p_report_id uuid)
 returns jsonb
@@ -1135,3 +1205,141 @@ drop trigger if exists audit_integration_clients on public.integration_clients;
 create trigger audit_integration_clients
   after insert or update or delete on public.integration_clients
   for each row execute function public._audit_row_change();
+
+-- =============================================================================
+-- UI Settings RPCs (sidebar defaults + per-user override + handover defaults)
+-- =============================================================================
+
+create or replace function public.update_sidebar_defaults(p_role text, p_items text[])
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_defaults jsonb;
+  v_items jsonb;
+begin
+  if not public.app_is_owner_manager() then
+    raise exception 'Bạn không có quyền cập nhật quyền xem trang.';
+  end if;
+  if p_role not in ('owner','manager','staff_operator','employee_viewer') then
+    raise exception 'Role không hợp lệ.';
+  end if;
+  v_items := coalesce(to_jsonb(p_items), '[]'::jsonb);
+  v_defaults := coalesce((select value from public.app_settings where key = 'sidebar_defaults'), '{}'::jsonb);
+  v_defaults := jsonb_set(v_defaults, array[p_role], v_items, true);
+  insert into public.app_settings (key, value, is_public, updated_by)
+  values ('sidebar_defaults', v_defaults, true, auth.uid())
+  on conflict (key) do update set value = excluded.value, is_public = true, updated_by = auth.uid(), updated_at = now();
+  return v_defaults;
+end;
+$$;
+
+create or replace function public.update_user_sidebar_config(p_profile_id uuid, p_items text[] default null)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_value jsonb := case when p_items is null then null else to_jsonb(p_items) end;
+begin
+  if not public.app_is_owner_manager() then
+    raise exception 'Bạn không có quyền cập nhật override nhân viên.';
+  end if;
+  insert into public.profiles (id, sidebar_config, updated_at)
+  values (p_profile_id, v_value, now())
+  on conflict (id) do update set sidebar_config = excluded.sidebar_config, updated_at = now();
+  return jsonb_build_object('profile_id', p_profile_id, 'sidebar_config', v_value);
+end;
+$$;
+
+create or replace function public.update_handover_default_tasks(p_tasks jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+begin
+  if not public.app_is_owner_manager() then
+    raise exception 'Bạn không có quyền cập nhật mẫu checklist.';
+  end if;
+  if jsonb_typeof(coalesce(p_tasks, '[]'::jsonb)) <> 'array' then
+    raise exception 'Danh sách checklist không hợp lệ.';
+  end if;
+  insert into public.app_settings (key, value, is_public, updated_by)
+  values ('handover_default_tasks', p_tasks, true, auth.uid())
+  on conflict (key) do update set value = excluded.value, is_public = true, updated_by = auth.uid(), updated_at = now();
+  return p_tasks;
+end;
+$$;
+
+create or replace function public.update_handover_session_tasks(p_session_id uuid, p_tasks jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_task jsonb;
+  v_id uuid;
+  v_keep uuid[] := '{}';
+  v_sort integer := 10;
+  v_key text;
+  v_label text;
+begin
+  if not public.app_is_owner_manager() then
+    raise exception 'Bạn không có quyền chỉnh nội dung checklist trong ngày.';
+  end if;
+  if not exists (select 1 from public.handover_sessions where id = p_session_id) then
+    raise exception 'Không tìm thấy checklist trong ngày.';
+  end if;
+  if jsonb_typeof(coalesce(p_tasks, '[]'::jsonb)) <> 'array' then
+    raise exception 'Danh sách checklist không hợp lệ.';
+  end if;
+  for v_task in select * from jsonb_array_elements(coalesce(p_tasks, '[]'::jsonb)) loop
+    v_label := trim(coalesce(v_task->>'label', ''));
+    if v_label = '' then continue; end if;
+    v_key := coalesce(nullif(v_task->>'key', ''), 'task_' || v_sort::text);
+    v_id := nullif(v_task->>'id', '')::uuid;
+    if v_id is not null and exists (select 1 from public.handover_tasks where id = v_id and session_id = p_session_id) then
+      update public.handover_tasks set task_key = v_key, label = v_label, sort_order = coalesce((v_task->>'sort_order')::integer, v_sort) where id = v_id and session_id = p_session_id;
+    else
+      insert into public.handover_tasks (session_id, task_key, label, sort_order)
+      values (p_session_id, v_key, v_label, coalesce((v_task->>'sort_order')::integer, v_sort))
+      on conflict (session_id, task_key) do update set label = excluded.label, sort_order = excluded.sort_order
+      returning id into v_id;
+    end if;
+    v_keep := array_append(v_keep, v_id);
+    v_sort := v_sort + 10;
+  end loop;
+  delete from public.handover_tasks where session_id = p_session_id and not (id = any(v_keep));
+  return public.handover_session_payload(p_session_id);
+end;
+$$;
+
+grant execute on function public.update_sidebar_defaults(text, text[]) to authenticated;
+grant execute on function public.update_user_sidebar_config(uuid, text[]) to authenticated;
+grant execute on function public.update_handover_default_tasks(jsonb) to authenticated;
+grant execute on function public.update_handover_session_tasks(uuid, jsonb) to authenticated;
+
+-- =============================================================================
+-- KiotViet sync helper: get_last_sync_cursor (cho polling future)
+-- =============================================================================
+
+create or replace function public.get_last_sync_cursor(p_source text default 'kiotviet')
+returns timestamptz
+language sql
+stable
+security definer
+set search_path = public, auth
+as $$
+  select max(finished_at)
+  from public.sales_sync_runs
+  where source = p_source
+    and status = 'success'
+    and finished_at is not null;
+$$;
+
+grant execute on function public.get_last_sync_cursor(text) to authenticated;

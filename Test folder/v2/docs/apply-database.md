@@ -1,41 +1,50 @@
-﻿# Apply database lên Supabase self-hosted
+# Apply database lên Supabase
 
 ## 1. Chuẩn bị
 
-Bạn cần có quyền chạy SQL trên Supabase Postgres. Có thể dùng Supabase Studio SQL Editor hoặc `psql`.
+Cần quyền chạy SQL trên Supabase Postgres — qua Supabase Studio SQL Editor hoặc `psql`.
 
 ## 2. Chạy SQL theo thứ tự
 
-Trong Studio SQL Editor, copy và chạy lần lượt:
+Trong Studio SQL Editor (hoặc psql), chạy lần lượt:
 
-1. `database/001_schema.sql`
-2. `database/002_functions.sql`
-3. `database/003_rls.sql`
-4. `database/004_seed.sql`
+1. `database/001_schema.sql` — Tables + indexes + CHECK constraints + base triggers
+2. `database/002_functions.sql` — RPC functions + audit triggers
+3. `database/003_rls.sql` — Row Level Security policies
+4. `database/004_seed.sql` — Default categories + templates + app_settings
 
-Không đảo thứ tự vì RLS phụ thuộc function role, còn seed phụ thuộc schema.
+**Không đảo thứ tự**: RLS phụ thuộc function role (002), seed phụ thuộc schema (001) + functions (002).
 
-Nếu database đã chạy bản cũ, chạy thêm:
+Tất cả file **idempotent** — re-run an toàn.
 
-5. `database/005_cash_template_pos_sync_update.sql`
-
-Sau đó chạy lại `database/002_functions.sql` để cập nhật RPC mới cho template chi phí, công thức chốt két và báo cáo snapshot.
+Nếu DB cũ còn leftover state khiến 001 báo lỗi (vd: `column does not exist`), chạy `database/000_reset.sql` TRƯỚC để dọn schema sạch (DESTRUCTIVE — xóa hết data).
 
 ## 3. Tạo owner đầu tiên
 
-Tạo user trong Supabase Auth trước. Sau đó map user đó vào owner:
+Tạo user trong Supabase Auth (Studio → Authentication → Users → Add user). Sau đó map user vào `employee_accounts`:
 
 ```sql
-insert into public.profiles (id, display_name)
-values ('AUTH_USER_UUID', 'Chủ quán')
-on conflict (id) do update set display_name = excluded.display_name;
+-- Bước A: Tạo employee row
+insert into public.employees (name, position, hourly_rate, is_active)
+values ('Owner Name', 'Chủ quán', 0, true)
+returning id;
 
-insert into public.employee_accounts (auth_user_id, role, status)
-values ('AUTH_USER_UUID', 'owner', 'active')
-on conflict (auth_user_id) do update set role = 'owner', status = 'active';
+-- Bước B: Link auth user vào employee với role owner
+insert into public.employee_accounts (employee_id, auth_user_id, role, status)
+values (
+  '<employee_id từ bước A>',
+  '<auth_user_id từ Auth dashboard>',
+  'owner',
+  'active'
+);
+
+-- Optional: thêm profile metadata
+insert into public.profiles (id, display_name)
+values ('<auth_user_id>', 'Owner Name')
+on conflict (id) do nothing;
 ```
 
-## 4. Tạo nhân viên mẫu
+## 4. Tạo nhân viên mẫu (optional)
 
 ```sql
 insert into public.employees (code, name, position, hourly_rate)
@@ -43,26 +52,59 @@ values
   ('NV001', 'Lan', 'Thu ngân', 26000),
   ('NV002', 'Minh', 'Pha chế', 28000),
   ('NV003', 'Phúc', 'Phục vụ', 25000)
-on conflict (code) do update set name = excluded.name, position = excluded.position, hourly_rate = excluded.hourly_rate;
+on conflict (code) do update
+  set name = excluded.name,
+      position = excluded.position,
+      hourly_rate = excluded.hourly_rate;
 ```
 
-## 5. Bật n8n client
+## 5. Tạo integration_clients (cho POS sync)
 
-```sql
-update public.integration_clients
-set client_secret_hash = crypt('YOUR_LONG_RANDOM_SECRET', gen_salt('bf')), is_active = true
-where client_id = 'n8n-local';
-```
-
-Giữ secret này trong n8n. Không đưa `SUPABASE_SERVICE_ROLE_KEY` vào n8n.
-
-## 6. Deploy Edge Function gọi n8n
+Next.js API route `/api/kiotviet/sync` cần authenticate với RPC `ingest_kiotviet_batch` qua row trong `integration_clients`. Generate secret an toàn:
 
 ```bash
-supabase functions deploy trigger-pos-sync
-supabase secrets set N8N_POS_SYNC_WEBHOOK_URL="https://n8n.example.com/webhook/chill-pos-sync"
-supabase secrets set N8N_POS_SYNC_SECRET="YOUR_LONG_RANDOM_WEBHOOK_SECRET"
-supabase secrets set POS_SYNC_COOLDOWN_SECONDS="300"
+# Linux/Mac
+openssl rand -base64 32
+
+# Hoặc Windows PowerShell
+[Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
 ```
 
-Xem thêm payload và HMAC ở `docs/n8n-ingest.md`.
+```sql
+insert into public.integration_clients (client_id, client_secret_hash, name, is_active)
+values (
+  'chill-erp',
+  crypt('<paste-secret-từ-bước-trên>', gen_salt('bf')),
+  'Chill ERP Next.js',
+  true
+);
+```
+
+Sau đó set 2 env trong Next.js (`.env.local` cho dev, server `.env` cho prod):
+
+```env
+INGEST_CLIENT_ID=chill-erp
+INGEST_CLIENT_SECRET=<paste-secret-plain-text>
+```
+
+## 6. Cấu hình KiotViet credentials
+
+Login ERP → Settings → KiotViet (FNB) → nhập:
+- **Retailer**: tên cửa hàng (vd: `chillcoffeegarden`)
+- **Client ID** + **Client Secret**: lấy từ KiotViet manager → Thiết lập → Kết nối API
+- Tích **Bật KiotViet sync**
+- Bấm **Lưu cấu hình**
+
+Test bằng cách bấm **Force sync** → kiểm tra danh sách invoice trong tab Pivot.
+
+## 7. Setup polling cron (optional)
+
+Để invoice tự sync 2 phút/lần, đọc `docs/kiotviet-polling.md` — setup system crontab hoặc systemd timer trên Linux server.
+
+## 8. Setup webhook (optional, cho product/stock updates)
+
+KiotViet FNB hỗ trợ webhook cho `product.update`, `customer.update`, `stock.update`. Đọc `docs/kiotviet-polling.md` mục 8.
+
+---
+
+Xem thêm chi tiết payload của RPC `ingest_kiotviet_batch` ở `docs/samples/supabase-rpc-ingest-payload.json`.

@@ -1,12 +1,15 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { finalizeCashCloseReport, saveCashCount } from "@/lib/data";
 import { formatDateTime, formatNumber, formatVND, moneyFromInput } from "@/lib/format";
 import type { Account, CashDayOpening, DashboardData } from "@/lib/types";
 import { validateCashCount } from "@/lib/validation";
 import type { Notice } from "@/shared";
+import { queryKeys, useCashCountsQuery } from "@/hooks/queries";
+import { CashHistorySection } from "./cash-history-section";
 import { DENOMINATIONS, handleDenominationKeyDown, normalizeCount } from "./denominations";
 import { OpeningCashModal } from "./opening-cash-modal";
 
@@ -32,11 +35,21 @@ export function CashPanel({
   const [note, setNote] = useState("");
   const [isClosing, setClosing] = useState(false);
   const [isOpeningModalOpen, setOpeningModalOpen] = useState(false);
+  // Manual POS override — dùng khi KiotViet API không sync được (mất kết nối, token hết hạn).
+  const [isManualPos, setManualPos] = useState(false);
+  const [manualPosTotal, setManualPosTotal] = useState("");
+  const [manualPosCash, setManualPosCash] = useState("");
+  const [manualPosNonCash, setManualPosNonCash] = useState("");
   const countInputRefs = useRef<Record<number, HTMLInputElement | null>>({});
+  const queryClient = useQueryClient();
+  const cashCountsQuery = useCashCountsQuery(supabase, date);
   const physical = DENOMINATIONS.reduce((sum, denomination) => sum + denomination * (counts[denomination] ?? 0), 0);
-  const posTotal = dashboard.total_sales;
-  const posCash = dashboard.cash_sales;
-  const posNonCash = dashboard.non_cash_sales ?? Math.max(0, posTotal - posCash);
+  // Khi bật manual mode, ưu tiên giá trị nhập tay; ngược lại dùng dashboard từ POS sync.
+  const posTotal = isManualPos ? moneyFromInput(manualPosTotal) : dashboard.total_sales;
+  const posCash = isManualPos ? moneyFromInput(manualPosCash) : dashboard.cash_sales;
+  const posNonCash = isManualPos
+    ? moneyFromInput(manualPosNonCash)
+    : dashboard.non_cash_sales ?? Math.max(0, posTotal - posCash);
   const openingCash = cashOpening?.opening_total ?? dashboard.opening_cash ?? dashboard.latest_cash_count?.opening_cash ?? 0;
   const bankTransferConfirmed = moneyFromInput(bankTransfer);
   const reconciliationPreview = physical - openingCash + bankTransferConfirmed + dashboard.total_expenses + dashboard.payroll_paid;
@@ -69,13 +82,23 @@ export function CashPanel({
         denominations_json: counts,
         total_physical: physical,
         bank_transfer_confirmed: bankTransferConfirmed,
-        note
+        note,
+        // Chỉ gửi POS override khi user bật manual mode.
+        ...(isManualPos
+          ? {
+              pos_total: posTotal,
+              pos_cash_total: posCash,
+              pos_non_cash_total: posNonCash
+            }
+          : {})
       });
       if (mode === "shift_close" && saved.cash_count_id) await finalizeCashCloseReport(supabase, saved.cash_count_id);
       onNotice({
         type: "success",
         message: mode === "shift_close" ? "Đã chốt két và tạo báo cáo snapshot." : "Đã lưu kiểm két nhanh."
       });
+      // Cập nhật lịch sử kiểm két ngay (tránh chờ realtime delay).
+      queryClient.invalidateQueries({ queryKey: queryKeys.cashCounts(date) });
       onRefresh();
     } catch (error) {
       onNotice({ type: "error", message: error instanceof Error ? error.message : "Không lưu được kiểm két." });
@@ -106,11 +129,11 @@ export function CashPanel({
           </div>
           {canOpenOpeningModal && (
             <button
-              className={cashOpening ? "ghostButton" : "primaryButton"}
+              className={!cashOpening || canEditOpening ? "primaryButton" : "ghostButton"}
               type="button"
               onClick={() => setOpeningModalOpen(true)}
             >
-              {cashOpening ? (canEditOpening ? "Xem / Sửa" : "Xem") : "Nhập tiền đầu ngày"}
+              {cashOpening ? (canEditOpening ? "Sửa tiền đầu ngày" : "Xem tiền đầu ngày") : "Nhập tiền đầu ngày"}
             </button>
           )}
         </div>
@@ -189,6 +212,53 @@ export function CashPanel({
           </small>
         </div>
         <div className="cashSummaryFields">
+          <div className="manualPosBlock">
+            <label className="manualPosToggle">
+              <input
+                type="checkbox"
+                checked={isManualPos}
+                onChange={(event) => setManualPos(event.target.checked)}
+              />
+              <span>
+                <strong>Nhập POS thủ công</strong>
+                <em>Dùng khi POS không sync được (KiotViet API offline, mất kết nối)</em>
+              </span>
+            </label>
+            {isManualPos && (
+              <div className="manualPosFields">
+                <label className="fieldStack">
+                  Tổng POS (thủ công)
+                  <input
+                    value={manualPosTotal}
+                    onChange={(event) => setManualPosTotal(event.target.value)}
+                    inputMode="numeric"
+                    placeholder="0"
+                  />
+                </label>
+                <label className="fieldStack">
+                  POS tiền mặt
+                  <input
+                    value={manualPosCash}
+                    onChange={(event) => setManualPosCash(event.target.value)}
+                    inputMode="numeric"
+                    placeholder="0"
+                  />
+                </label>
+                <label className="fieldStack">
+                  POS chuyển khoản
+                  <input
+                    value={manualPosNonCash}
+                    onChange={(event) => setManualPosNonCash(event.target.value)}
+                    inputMode="numeric"
+                    placeholder="0"
+                  />
+                </label>
+                <p className="manualPosHint">
+                  Khi bật, các giá trị POS ở bảng đối soát phía trên sẽ dùng số bạn nhập tay thay vì dữ liệu sync.
+                </p>
+              </div>
+            )}
+          </div>
           <label className="fieldStack">
             Tiền chuyển khoản đã nhận
             <input
@@ -216,6 +286,13 @@ export function CashPanel({
           </button>
         </div>
       </aside>
+      <div className="cashHistoryWrapper">
+        <CashHistorySection
+          counts={cashCountsQuery.data ?? []}
+          isLoading={cashCountsQuery.isLoading}
+          isFetching={cashCountsQuery.isFetching}
+        />
+      </div>
       {isOpeningModalOpen && (
         <OpeningCashModal
           supabase={supabase}

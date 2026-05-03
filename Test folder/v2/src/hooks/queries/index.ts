@@ -4,5 +4,5 @@ export { useAppSettingsQuery } from "./use-app-settings-query";
 export { useDashboardQuery } from "./use-dashboard-query";
 export { useExpenseCategoriesQuery, useExpenseTemplatesQuery } from "./use-expense-queries";
 export { useEmployeesQuery, useShiftsQuery, usePayrollQuery } from "./use-shift-queries";
-export { useCashOpeningQuery, useReportsQuery } from "./use-cash-queries";
+export { useCashCountsQuery, useCashOpeningQuery, useReportsQuery } from "./use-cash-queries";
 export { useHandoverQuery } from "./use-handover-query";

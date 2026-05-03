@@ -1,12 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { AppSettings } from "@/lib/types";
+import { toAppError } from "./_common";
 
 export async function loadAppSettings(supabase: SupabaseClient): Promise<AppSettings> {
   const { data, error } = await supabase
     .from("app_settings")
     .select("key, value")
     .in("key", ["sidebar_defaults", "handover_default_tasks", "denominations", "cash_diff_threshold"]);
-  if (error) throw error;
+  if (error) throw toAppError(error, "Không tải được cấu hình.");
 
   const settings: AppSettings = { sidebar_defaults: {}, handover_default_tasks: [] };
   for (const row of (data ?? []) as Array<{ key: string; value: unknown }>) {
@@ -28,12 +29,12 @@ export async function loadAppSettings(supabase: SupabaseClient): Promise<AppSett
 
 export async function updateSidebarDefaults(supabase: SupabaseClient, role: string, items: string[]) {
   const { data, error } = await supabase.rpc("update_sidebar_defaults", { p_role: role, p_items: items });
-  if (error) throw error;
+  if (error) throw toAppError(error, "Không cập nhật được sidebar defaults.");
   return data as AppSettings["sidebar_defaults"];
 }
 
 export async function updateUserSidebarConfig(supabase: SupabaseClient, profileId: string, items: string[] | null) {
   const { data, error } = await supabase.rpc("update_user_sidebar_config", { p_profile_id: profileId, p_items: items });
-  if (error) throw error;
+  if (error) throw toAppError(error, "Không cập nhật được sidebar cá nhân.");
   return data;
 }

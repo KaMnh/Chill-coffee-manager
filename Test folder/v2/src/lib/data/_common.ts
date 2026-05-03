@@ -3,25 +3,20 @@ export function unwrapJson<T>(data: unknown, fallback: T): T {
   return data as T;
 }
 
-export async function getFunctionErrorMessage(error: unknown, fallback: string) {
-  const context = (error as { context?: Response })?.context;
-  if (context && typeof context.clone === "function") {
-    try {
-      const body = (await context.clone().json()) as Record<string, unknown>;
-      const message = String(body.error ?? body.message ?? fallback);
-      const details = [
-        body.n8n_status ? `n8n HTTP ${body.n8n_status}` : "",
-        body.detail ? String(body.detail) : ""
-      ].filter(Boolean);
-      return details.length ? `${message} ${details.join(" - ")}` : message;
-    } catch {
-      try {
-        const text = await context.clone().text();
-        if (text) return text;
-      } catch {
-        // Fall through to the generic error message.
-      }
-    }
+/**
+ * Convert a Supabase PostgrestError (plain object) into a proper Error
+ * instance with a human-readable message. PostgrestError không extend Error,
+ * nên `error.toString()` ra "[object Object]" trên Next.js error overlay.
+ * Dùng helper này ở mọi data layer để có message rõ ràng.
+ */
+export function toAppError(error: unknown, fallback: string): Error {
+  if (error instanceof Error) return error;
+  if (error && typeof error === "object") {
+    const e = error as { message?: unknown; details?: unknown; hint?: unknown };
+    const parts = [e.message, e.details, e.hint].filter(
+      (part): part is string => typeof part === "string" && part.length > 0
+    );
+    if (parts.length) return new Error(parts.join(" — "));
   }
-  return error instanceof Error ? error.message : fallback;
+  return new Error(fallback);
 }

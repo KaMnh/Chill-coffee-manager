@@ -1,12 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { DashboardData } from "@/lib/types";
-import { unwrapJson } from "./_common";
+import { toAppError, unwrapJson } from "./_common";
 
 export async function loadDashboard(supabase: SupabaseClient, businessDate: string) {
   const { data, error } = await supabase.rpc("dashboard_daily_ops", {
     p_business_date: businessDate
   });
-  if (error) throw error;
+  if (error) throw toAppError(error, "Không tải được dữ liệu dashboard.");
   return unwrapJson<DashboardData>(data, {
     business_date: businessDate,
     total_sales: 0,

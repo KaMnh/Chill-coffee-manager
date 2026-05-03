@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { PayrollRecord, ShiftAssignment } from "@/lib/types";
+import { toAppError } from "./_common";
 
 export async function loadShiftAssignments(supabase: SupabaseClient, businessDate: string) {
   const { data, error } = await supabase
@@ -7,7 +8,7 @@ export async function loadShiftAssignments(supabase: SupabaseClient, businessDat
     .select("id, employee_id, business_date, check_in_at, check_out_at, total_minutes, status, employees(name, position)")
     .eq("business_date", businessDate)
     .order("check_in_at", { ascending: false, nullsFirst: false });
-  if (error) throw error;
+  if (error) throw toAppError(error, "Không tải được danh sách ca.");
 
   return ((data ?? []) as Array<Record<string, unknown>>).map((row) => {
     const employee = row.employees as { name?: string; position?: string | null } | undefined;
@@ -21,13 +22,13 @@ export async function loadShiftAssignments(supabase: SupabaseClient, businessDat
 
 export async function checkInEmployee(supabase: SupabaseClient, payload: Record<string, unknown>) {
   const { data, error } = await supabase.rpc("check_in_employee", { p_payload: payload });
-  if (error) throw error;
+  if (error) throw toAppError(error, "Không vào ca được.");
   return data;
 }
 
 export async function checkOutEmployee(supabase: SupabaseClient, payload: Record<string, unknown>) {
   const { data, error } = await supabase.rpc("check_out_employee", { p_payload: payload });
-  if (error) throw error;
+  if (error) throw toAppError(error, "Không ra ca được.");
   return data;
 }
 
@@ -39,7 +40,7 @@ export async function loadPayrollRecords(supabase: SupabaseClient, businessDate:
     )
     .eq("business_date", businessDate)
     .order("created_at", { ascending: false });
-  if (error) throw error;
+  if (error) throw toAppError(error, "Không tải được lương theo ca.");
 
   return ((data ?? []) as Array<Record<string, unknown>>).map((row) => {
     const employee = row.employees as { name?: string } | undefined;
@@ -59,7 +60,7 @@ export async function editPayrollRecord(supabase: SupabaseClient, payload: Recor
         "Supabase chưa có RPC edit_shift_payroll_record. Hãy apply lại database/002_functions.sql rồi thử sửa lượt lương."
       );
     }
-    throw error;
+    throw toAppError(error, "Không sửa được lượt lương.");
   }
   return data as {
     payroll_record_id?: string;

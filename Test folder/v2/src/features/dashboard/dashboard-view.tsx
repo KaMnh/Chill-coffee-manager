@@ -116,7 +116,7 @@ export function DashboardView({
         </div>
         <div className="listRows">
           {dashboard.sales_orders.length === 0 && (
-            <EmptyState title="Chưa có đơn POS" description="Dữ liệu KiotViet sau khi n8n sync sẽ hiện ở đây." />
+            <EmptyState title="Chưa có đơn POS" description="Dữ liệu KiotViet sau khi sync sẽ hiện ở đây." />
           )}
           {dashboard.sales_orders.slice(0, 5).map((order) => (
             <article className="listRow" key={order.id}>

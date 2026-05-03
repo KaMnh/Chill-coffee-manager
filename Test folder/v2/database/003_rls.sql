@@ -1,4 +1,14 @@
-﻿-- Chill Manager v2 - RLS policies
+﻿-- =============================================================================
+-- Chill Manager v2 — Row Level Security policies
+-- Apply order: 001 → 002 → 003 → 004
+-- Fully idempotent — drop + create pattern.
+--
+-- Quy tắc tổng quan:
+--   - app_role()       — JWT của user (owner/manager/staff_operator/employee_viewer)
+--   - app_is_owner_manager()    — admin role
+--   - app_is_staff_or_above()   — staff trở lên (loại trừ employee_viewer)
+--   - Sales* + Cash* + Audit*   — write qua security definer RPC, KHÔNG trực tiếp
+-- =============================================================================
 
 alter table public.profiles enable row level security;
 alter table public.employees enable row level security;

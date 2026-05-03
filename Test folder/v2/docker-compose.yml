@@ -1,17 +1,57 @@
-﻿services:
+# Chill Manager v2 — Docker Compose stack
+#
+# Tương thích: Docker Compose v2 (CLI), Dockge, Portainer Stack, Coolify.
+#
+# Yêu cầu trước khi chạy:
+#   1. File .env cùng thư mục (copy từ .env.example, điền giá trị thật)
+#   2. Supabase Postgres đã apply 4 file SQL trong database/ (xem docs/apply-database.md)
+#   3. integration_clients row đã insert (cho ingest RPC auth)
+#   4. Owner account đã tạo (Supabase Auth + employee_accounts)
+#
+# Start:    docker compose --env-file .env up -d --build
+# Logs:     docker compose logs -f
+# Stop:     docker compose down
+# Update:   git pull && docker compose --env-file .env up -d --build
+
+services:
   chill-manager-v2:
+    container_name: chill-manager-v2
+    restart: unless-stopped
     build:
       context: .
       args:
+        # Build args (NEXT_PUBLIC_* được bake vào client bundle khi build).
+        # Đổi giá trị → phải rebuild image (`up -d --build`).
         NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
         NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
         NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3009}
-    container_name: chill-manager-v2
-    restart: unless-stopped
     ports:
+      # APP_PORT mặc định 3009 — đổi nếu trùng port khác.
+      # Container nội bộ vẫn EXPOSE 3000.
       - "${APP_PORT:-3009}:3000"
     environment:
       NODE_ENV: production
+
+      # Public — đọc cả ở browser + Node server
       NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3009}
+
+      # Server-only secrets — KHÔNG bake vào browser bundle, chỉ Node server đọc
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      INGEST_CLIENT_ID: ${INGEST_CLIENT_ID:-chill-erp}
+      INGEST_CLIENT_SECRET: ${INGEST_CLIENT_SECRET}
+      CRON_SECRET: ${CRON_SECRET:-}
+    healthcheck:
+      # Healthcheck đơn giản: check homepage trả 200.
+      # Dockge UI sẽ hiển thị healthy/unhealthy.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

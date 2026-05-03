@@ -139,7 +139,10 @@ export type CashCount = {
   opening_cash?: number | null;
   bank_transfer_confirmed?: number | null;
   reconciliation_total?: number | null;
+  denominations_json?: Record<string, number> | null;
+  note?: string | null;
   report_id?: string | null;
+  report_status?: string | null;
 };
 
 export type CashDayOpening = {

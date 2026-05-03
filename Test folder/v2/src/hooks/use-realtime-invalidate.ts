@@ -27,6 +27,10 @@ export function useRealtimeInvalidate(supabase: SupabaseClient | null, businessD
       )
       .on("postgres_changes", { event: "*", schema: "public", table: "cash_close_reports" }, () => {
         queryClient.invalidateQueries({ queryKey: queryKeys.reports(businessDate) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.cashCounts(businessDate) });
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "cash_counts" }, () => {
+        queryClient.invalidateQueries({ queryKey: queryKeys.cashCounts(businessDate) });
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "handover_tasks" }, () => {
         queryClient.invalidateQueries({ queryKey: queryKeys.handover(businessDate) });

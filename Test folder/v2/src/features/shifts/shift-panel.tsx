@@ -54,9 +54,20 @@ export function ShiftPanel({
   const invalidTime = Boolean(startTime && endTime && new Date(endTime).getTime() < new Date(startTime).getTime());
 
   async function checkIn(employee: Employee) {
-    await checkInEmployee(supabase, { employee_id: employee.id, business_date: date, check_in_at: new Date().toISOString() });
-    onNotice({ type: "success", message: employee.name + " đã vào ca." });
-    onRefresh();
+    try {
+      await checkInEmployee(supabase, {
+        employee_id: employee.id,
+        business_date: date,
+        check_in_at: new Date().toISOString()
+      });
+      onNotice({ type: "success", message: employee.name + " đã vào ca." });
+      onRefresh();
+    } catch (error) {
+      onNotice({
+        type: "error",
+        message: error instanceof Error ? error.message : "Không vào ca được."
+      });
+    }
   }
 
   function openCheckout(shift: ShiftAssignment) {
@@ -69,18 +80,25 @@ export function ShiftPanel({
 
   async function submitCheckout() {
     if (!checkout || invalidTime) return;
-    await checkOutEmployee(supabase, {
-      shift_assignment_id: checkout.id,
-      employee_id: checkout.employee_id,
-      business_date: date,
-      check_in_at: fromDatetimeLocal(startTime),
-      check_out_at: fromDatetimeLocal(endTime),
-      allowance_amount: moneyFromInput(allowance),
-      note
-    });
-    onNotice({ type: "success", message: "Đã ra ca và lưu lương theo lượt." });
-    setCheckout(null);
-    onRefresh();
+    try {
+      await checkOutEmployee(supabase, {
+        shift_assignment_id: checkout.id,
+        employee_id: checkout.employee_id,
+        business_date: date,
+        check_in_at: fromDatetimeLocal(startTime),
+        check_out_at: fromDatetimeLocal(endTime),
+        allowance_amount: moneyFromInput(allowance),
+        note
+      });
+      onNotice({ type: "success", message: "Đã ra ca và lưu lương theo lượt." });
+      setCheckout(null);
+      onRefresh();
+    } catch (error) {
+      onNotice({
+        type: "error",
+        message: error instanceof Error ? error.message : "Không ra ca được."
+      });
+    }
   }
 
   function renderEmployee(employee: Employee) {

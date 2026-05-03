@@ -1,13 +1,9 @@
-﻿// /** @type {import('next').NextConfig} */
-// const nextConfig = {
-//   output: 'standalone',
-//   poweredByHeader: false,
-//   reactStrictMode: true
-// };
-
-// export default nextConfig;
-/** @type {import('next').NextConfig} */
+﻿/** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Standalone build: outputs `.next/standalone/server.js` for Docker (Dockerfile relies on this).
+  output: 'standalone',
+  poweredByHeader: false,
+  reactStrictMode: true,
   allowedDevOrigins: [
     '10.8.0.4',
     'chill.kamnh.site',
@@ -15,6 +11,6 @@ const nextConfig = {
     'localhost',
     '127.0.0.1',
   ],
-}
+};
 
-export default nextConfig
+export default nextConfig;

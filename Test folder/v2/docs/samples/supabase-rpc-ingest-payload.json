@@ -1,6 +1,6 @@
 {
   "p_payload": {
-    "client_id": "n8n-local",
+    "client_id": "chill-erp",
     "client_secret": "YOUR_LONG_RANDOM_SECRET",
     "batch_id": "kiotviet-2026-04-23-manual-test",
     "source": "kiotviet",

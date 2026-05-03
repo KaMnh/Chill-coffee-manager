@@ -15,5 +15,6 @@ export const queryKeys = {
   payroll: (businessDate: string) => ["payroll", businessDate] as const,
   reports: (businessDate: string) => ["reports", businessDate] as const,
   cashOpening: (businessDate: string) => ["cash-opening", businessDate] as const,
+  cashCounts: (businessDate: string) => ["cash-counts", businessDate] as const,
   handover: (businessDate: string) => ["handover", businessDate] as const
 };

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Account, SettingsAccount } from "@/lib/types";
+import { toAppError } from "./_common";
 
 export async function loadCurrentAccount(supabase: SupabaseClient): Promise<Account | null> {
   const {
@@ -14,7 +15,7 @@ export async function loadCurrentAccount(supabase: SupabaseClient): Promise<Acco
     .eq("auth_user_id", user.id)
     .maybeSingle();
 
-  if (error) throw error;
+  if (error) throw toAppError(error, "Không tải được tài khoản.");
   if (!data) return null;
 
   const row = data as unknown as Account & { employees?: Account["employee"] };
@@ -33,14 +34,14 @@ export async function loadSettingsAccounts(supabase: SupabaseClient): Promise<Se
     .from("employee_accounts")
     .select("id, auth_user_id, role, status, employees(name, position)")
     .order("role", { ascending: true });
-  if (error) throw error;
+  if (error) throw toAppError(error, "Không tải được danh sách tài khoản.");
 
   const rows = (data ?? []) as Array<Record<string, unknown>>;
   const profileIds = rows.map((row) => row.auth_user_id).filter(Boolean) as string[];
   const { data: profiles, error: profileError } = profileIds.length
     ? await supabase.from("profiles").select("id, sidebar_config").in("id", profileIds)
     : { data: [], error: null };
-  if (profileError) throw profileError;
+  if (profileError) throw toAppError(profileError, "Không tải được profile.");
 
   const profileMap = new Map(
     (profiles ?? []).map((profile: { id: string; sidebar_config: string[] | null }) => [profile.id, profile.sidebar_config])

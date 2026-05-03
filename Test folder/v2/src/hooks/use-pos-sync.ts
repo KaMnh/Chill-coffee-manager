@@ -12,7 +12,7 @@ type SalesSyncRunMeta = NonNullable<DashboardData["latest_sync"]>;
 const STALE_MS = 30 * 60 * 1000;
 
 /**
- * Drive POS sync: exposes a mutation to manually trigger n8n,
+ * Drive POS sync: exposes a mutation to manually trigger KiotViet sync,
  * and an effect that auto-syncs when latest run is stale/failed.
  * Replaces the autoSyncKeys+accountRef workaround.
  */

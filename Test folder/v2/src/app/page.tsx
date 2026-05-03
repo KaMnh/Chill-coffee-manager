@@ -169,6 +169,7 @@ export default function Home() {
     queryClient.invalidateQueries({ queryKey: queryKeys.payroll(businessDate) });
     queryClient.invalidateQueries({ queryKey: queryKeys.reports(businessDate) });
     queryClient.invalidateQueries({ queryKey: queryKeys.cashOpening(businessDate) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.cashCounts(businessDate) });
     queryClient.invalidateQueries({ queryKey: queryKeys.handover(businessDate) });
     queryClient.invalidateQueries({ queryKey: queryKeys.templates() });
     queryClient.invalidateQueries({ queryKey: queryKeys.employees() });
@@ -183,12 +184,12 @@ export default function Home() {
       try {
         const result = await posSyncMutation.mutateAsync({ force, reason });
         if (result.status === "skipped") {
-          setNotice({ type: "info", message: result.message ?? "POS vừa được đồng bộ gần đây, chưa cần gọi n8n." });
+          setNotice({ type: "info", message: result.message ?? "POS vừa được đồng bộ gần đây, chưa cần sync lại." });
           refresh();
           return;
         }
-        setNotice({ type: "success", message: result.message ?? "Đã gửi yêu cầu cập nhật POS qua n8n." });
-        // Realtime will invalidate dashboard when n8n finishes; nudge after a short delay too.
+        setNotice({ type: "success", message: result.message ?? "Đã sync POS từ KiotViet." });
+        // Realtime will invalidate dashboard when sync finishes; nudge after a short delay too.
         window.setTimeout(refresh, 2500);
       } catch (error) {
         setNotice({

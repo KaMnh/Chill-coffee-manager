@@ -1,458 +1,408 @@
-# Deploy / Rollout Plan — Chill Manager v2 (P0+P1+P2)
+# Deploy Plan — Chill Manager v2
 
-Plan này áp dụng sau khi đã hoàn tất 16 task P0+P1+P2 trong code. Phạm vi: đưa thay đổi từ working copy lên staging → production.
+Plan deploy lên production sau khi Phase 1 + Phase 2 KiotViet integration xong.
 
-## Tóm tắt thành phần thay đổi
+Architecture: **Next.js 15 (Docker) + Supabase Postgres + KiotViet API (direct)**. KHÔNG còn dùng n8n + Edge Function.
 
-| Component | File / Object | Risk |
+---
+
+## Tóm tắt thành phần
+
+| Component | Where | Risk |
 |---|---|---|
-| Database schema | `database/001_schema.sql` (+pos_sync_attempts, audit_log, 9 CHECK constraints) | **HIGH** (CHECK có thể fail nếu data cũ vi phạm) |
-| Database functions | `database/002_functions.sql` (numeric guards, denomination whitelist, length checks, audit triggers) | MEDIUM |
-| Database RLS | `database/003_rls.sql` (employee_viewer tightened, new policies) | MEDIUM (đổi behaviour viewer) |
-| Database seed | `database/004_seed.sql` (xoá default `n8n-local`) | LOW (cần manual insert thay thế) |
-| Edge Function | `supabase/functions/trigger-pos-sync/index.ts` (CORS, rate limit, HMAC `${ts}.${body}`) | HIGH (n8n phải update đồng bộ) |
-| Frontend | Next.js refactor + TanStack Query + middleware + lazy modal | LOW (backward compatible) |
-| Docs | `docs/n8n-ingest.md` HMAC bắt buộc | LOW |
+| Database schema | Supabase Postgres (4 SQL files: 001-004) | MEDIUM (CHECK có thể fail nếu data cũ vi phạm) |
+| Next.js app | Docker container trên Linux server | LOW (idempotent build) |
+| Cron polling | System cron hoặc systemd timer | LOW |
+| Reverse proxy | Nginx Proxy Manager + Let's Encrypt | LOW |
+| KiotViet config | Database app_settings + Settings UI | LOW |
+
+---
 
 ## Pre-flight checklist
 
-Chạy trên **staging trước** rồi mới production. Backup DB trước khi bắt đầu.
-
 ### 1. Backup
 ```bash
-pg_dump -h <host> -U postgres -Fc <db> > pre-deploy-$(date +%Y%m%d-%H%M).dump
+# Backup full DB trước khi apply schema mới
+pg_dump -h <supabase-host> -U postgres -Fc <db> \
+  > pre-deploy-$(date +%Y%m%d-%H%M).dump
 ```
 
-### 2. Data integrity check (bắt buộc trước khi apply CHECK constraints)
-Chạy 9 query này. Nếu bất kỳ row nào trả về > 0 → dọn data trước, không deploy.
+### 2. Data integrity check (chỉ cần nếu DB đã có data)
+9 query này phải trả về 0. Nếu có row vi phạm → dọn data trước hoặc skip CHECK constraint.
 
 ```sql
--- 1. employees.hourly_rate
-select count(*) as bad_employees from public.employees where hourly_rate < 0 or hourly_rate > 10000000;
-
--- 2. expenses.amount/quantity/unit_price
-select count(*) as bad_expenses from public.expenses
-where amount < 0 or amount > 1000000000 or quantity < 0 or quantity > 99999 or unit_price < 0;
-
--- 3. shift_payroll_records
-select count(*) as bad_payroll from public.shift_payroll_records
-where base_pay < 0 or total_pay < 0 or allowance_amount < 0 or hourly_rate < 0;
-
--- 4. sales_orders
-select count(*) as bad_orders from public.sales_orders
-where net_amount < 0 or total_payment < 0 or gross_amount < 0 or discount_amount < 0;
-
--- 5. sales_order_items
-select count(*) as bad_items from public.sales_order_items
-where quantity < 0 or unit_price < 0 or line_total < 0 or discount_amount < 0;
-
--- 6. cash_counts
-select count(*) as bad_counts from public.cash_counts
-where total_physical < 0 or pos_total < 0 or pos_cash_total < 0 or pos_non_cash_total < 0;
-
--- 7. cash_day_openings
-select count(*) as bad_openings from public.cash_day_openings where opening_total < 0;
-
--- 8. denomination data ngoài whitelist 1k-500k
+select count(*) from public.employees where hourly_rate < 0 or hourly_rate > 10000000;
+select count(*) from public.expenses where amount < 0 or amount > 1000000000 or quantity < 0 or quantity > 99999 or unit_price < 0;
+select count(*) from public.shift_payroll_records where base_pay < 0 or total_pay < 0 or allowance_amount < 0 or hourly_rate < 0;
+select count(*) from public.sales_orders where net_amount < 0 or total_payment < 0 or gross_amount < 0 or discount_amount < 0;
+select count(*) from public.sales_order_items where quantity < 0 or unit_price < 0 or line_total < 0 or discount_amount < 0;
+select count(*) from public.cash_counts where total_physical < 0 or pos_total < 0 or pos_cash_total < 0 or pos_non_cash_total < 0;
+select count(*) from public.cash_day_openings where opening_total < 0;
 select id, denominations_json from public.cash_day_openings
-where exists (
-  select 1 from jsonb_each_text(denominations_json) as d(k, v)
-  where k !~ '^(1000|2000|5000|10000|20000|50000|100000|200000|500000)$' or v::numeric > 10000
-);
-
--- 9. integration_clients còn dùng default secret (ví hash check khó, nên chỉ verify thủ công sau khi xoá seed)
-select id, client_id, is_active, last_used_at from public.integration_clients;
+where exists (select 1 from jsonb_each_text(denominations_json) as d(k, v)
+  where k !~ '^(1000|2000|5000|10000|20000|50000|100000|200000|500000)$' or v::numeric > 10000);
+select id, client_id, is_active from public.integration_clients;
 ```
 
 ### 3. Pre-flight checklist khác
-- [ ] Đã có file backup `.dump`
-- [ ] 8/8 data integrity query trả 0
-- [ ] Đã thông báo owner: viewer mất quyền xem expenses 2 ngày gần nhất nếu chưa có `expense_history_permissions`
-- [ ] Đã thông báo team n8n: workflow phải update HMAC verify
-- [ ] Đã chuẩn bị secret `N8N_POS_SYNC_SECRET` mới nếu rotate
-- [ ] Đã có domain whitelist cho `APP_ALLOWED_ORIGINS` (vd: `https://chill.example.com,http://localhost:3009`)
+- [ ] Backup `.dump` đã tạo
+- [ ] Data integrity 8/8 query trả 0
+- [ ] Đã có credentials KiotViet (Client ID + Secret từ KiotViet manager)
+- [ ] Đã có domain + reverse proxy (Nginx Proxy Manager)
+- [ ] SSL cert ready (Let's Encrypt qua NPM)
+- [ ] Đã chuẩn bị `CRON_SECRET` random 32 byte
+- [ ] Đã chuẩn bị `INGEST_CLIENT_SECRET` random 32 byte
+- [ ] Đã có Supabase service_role key
 
 ---
 
 ## Stage 1 — Database migration
 
-### Order of execution
-Apply theo thứ tự **001 → 002 → 003 → 004**. Mỗi file là idempotent.
+Apply 4 file SQL theo thứ tự. Idempotent, có thể chạy lại an toàn.
 
 ```bash
-psql -h <host> -U postgres -d <db> -f database/001_schema.sql
-psql -h <host> -U postgres -d <db> -f database/002_functions.sql
-psql -h <host> -U postgres -d <db> -f database/003_rls.sql
-psql -h <host> -U postgres -d <db> -f database/004_seed.sql
+# Trên Supabase Studio SQL Editor (hoặc psql):
+# 1. database/001_schema.sql
+# 2. database/002_functions.sql
+# 3. database/003_rls.sql
+# 4. database/004_seed.sql
 ```
 
-### Sau khi apply 001 (mới: pos_sync_attempts, audit_log, CHECK constraints)
-```sql
--- Verify bảng mới
-select count(*) from public.pos_sync_attempts;  -- 0
-select count(*) from public.audit_log;            -- 0
+Nếu DB cũ có schema không khớp gây lỗi `column does not exist`, chạy `database/000_reset.sql` TRƯỚC (DESTRUCTIVE — xóa hết data).
 
--- Verify CHECK constraint đã đăng ký
-select conname from pg_constraint
-where conname in (
-  'employees_hourly_rate_check', 'expenses_amount_check', 'expenses_quantity_check',
-  'expenses_unit_price_check', 'payroll_pay_check', 'sales_orders_amount_check',
-  'sales_items_quantity_check', 'sales_items_price_check', 'cash_counts_total_check',
-  'cash_opening_total_check'
-);
--- Phải trả 10 dòng
+### Verify sau Stage 1
+
+```sql
+-- 1. Tables (~25)
+select count(*) from information_schema.tables where table_schema = 'public';
+
+-- 2. RPCs (~29)
+select count(*) from pg_proc where pronamespace = 'public'::regnamespace and prokind = 'f';
+
+-- 3. CHECK constraints (10)
+select conname from pg_constraint where conname like '%_check'
+  and conname in (
+    'employees_hourly_rate_check', 'expenses_amount_check', 'expenses_quantity_check',
+    'expenses_unit_price_check', 'payroll_pay_check', 'sales_orders_amount_check',
+    'sales_items_quantity_check', 'sales_items_price_check', 'cash_counts_total_check',
+    'cash_opening_total_check'
+  ) order by conname;
+
+-- 4. Audit triggers (8)
+select count(*) from pg_trigger where tgname like 'audit_%';
+
+-- 5. RLS policies (50+)
+select count(*) from pg_policies where schemaname = 'public';
+
+-- 6. Seed data
+select key from public.app_settings order by key;
+-- Phải thấy: cash_diff_threshold, denominations, handover_default_tasks,
+--            kiotviet_credentials, sidebar_defaults
 ```
 
-### Sau khi apply 002 (function guards + audit triggers)
-```sql
--- Test ingest_kiotviet_batch reject âm
-select public.ingest_kiotviet_batch(jsonb_build_object(
-  'client_id','test','client_secret','test',
-  'orders', jsonb_build_array(jsonb_build_object(
-    'id','t1','invoice_details', jsonb_build_array(jsonb_build_object('quantity',-1,'unit_price',1000)),
-    'payments', jsonb_build_array()))));
--- Phải lỗi 'Integration client không hợp lệ' (validate trước, không cần row trong table)
+### Setup integration_clients (cho POS ingest auth)
 
--- Test denomination whitelist
-select public.save_cash_day_opening(jsonb_build_object(
-  'business_date', current_date, 'denominations_json', '{"99999999":1}'::jsonb));
--- Phải lỗi 'denominations_json: chỉ chấp nhận mệnh giá VND 1k-500k...'
-
--- Test compute_cash_theory tương lai
-select public.compute_cash_theory(current_date, now() + interval '1 hour', 0);
--- Phải lỗi 'p_counted_at không được trong tương lai'
-
--- Test create_expense length
-select public.create_expense(jsonb_build_object(
-  'business_date', current_date, 'description', repeat('x', 600), 'amount', 1000));
--- Phải lỗi 'description vượt 500 ký tự'
-
--- Verify 8 audit trigger
-select tgname from pg_trigger where tgname like 'audit_%' order by 1;
--- Phải có: audit_app_settings, audit_cash_close, audit_cash_opening, audit_employee_accounts,
--- audit_employees, audit_expenses, audit_integration_clients, audit_payroll
+```bash
+# Generate secret
+SECRET=$(openssl rand -base64 32)
+echo "Save this secret to .env later: $SECRET"
 ```
 
-### Sau khi apply 003 (RLS)
 ```sql
--- Verify bảng mới có RLS
-select tablename, rowsecurity from pg_tables
-where schemaname = 'public' and tablename in ('pos_sync_attempts', 'audit_log');
--- Cả hai phải rowsecurity = true
-
--- Verify policy mới
-select polname from pg_policy where polname like 'pos_sync_attempts_%' or polname like 'audit_log_%';
--- Phải có 4 policy
-
--- Verify expenses_staff_read đã update
-select pg_get_expr(polqual, polrelid) from pg_policy
-where polname = 'expenses_staff_read';
--- KHÔNG được chứa 'current_date - 2'
-```
-
-### Sau khi apply 004 (seed)
-```sql
--- Verify default n8n-local seed đã không tồn tại HOẶC đã rotate
-select client_id, is_active, last_used_at from public.integration_clients;
--- Nếu còn 'n8n-local' với is_active=false thì OK; nếu là true phải đảm bảo secret đã thay
-```
-
-### Setup integration_clients cho n8n (manual sau khi xoá seed)
-```sql
--- 1. Generate secret 32 byte trong shell:
--- openssl rand -base64 32
--- 2. Insert
 insert into public.integration_clients (client_id, client_secret_hash, name, is_active)
-values ('n8n-local', crypt('<paste-secret-from-step-1>', gen_salt('bf')), 'n8n production', true);
--- 3. Lưu secret vào n8n env: N8N_CLIENT_SECRET=<secret-step-1>
+values (
+  'chill-erp',
+  crypt('<paste-SECRET-từ-bước-trên>', gen_salt('bf')),
+  'Chill ERP Next.js',
+  true
+);
 ```
 
-### Bật Realtime publication (cho P2.4)
+### Setup owner account đầu tiên
+
 ```sql
--- Cho phép realtime trên 4 bảng đang subscribe trong useRealtimeInvalidate
-alter publication supabase_realtime add table public.sales_sync_runs;
+-- Trong Supabase Studio → Authentication → Users → Add user (email + password)
+-- Sau đó:
+insert into public.employees (name, position, hourly_rate, is_active)
+values ('Owner Name', 'Chủ quán', 0, true)
+returning id;
+
+insert into public.employee_accounts (employee_id, auth_user_id, role, status)
+values (
+  '<employee_id từ trên>',
+  '<auth_user_id từ Auth dashboard>',
+  'owner',
+  'active'
+);
+```
+
+### Bật Realtime publication
+
+```sql
+alter publication supabase_realtime add table public.cash_counts;
 alter publication supabase_realtime add table public.cash_close_reports;
 alter publication supabase_realtime add table public.handover_tasks;
 alter publication supabase_realtime add table public.expenses;
-
--- Verify
-select * from pg_publication_tables where pubname = 'supabase_realtime'
-and tablename in ('sales_sync_runs', 'cash_close_reports', 'handover_tasks', 'expenses');
+alter publication supabase_realtime add table public.sales_sync_runs;
 ```
 
 ### Rollback Stage 1
-```sql
--- Roll back từng bảng (ngược thứ tự apply)
--- ⚠️ Chỉ làm nếu staging fail; production rollback từ pg_dump nhanh hơn
-
--- 1. Drop CHECK constraints
-alter table public.employees drop constraint if exists employees_hourly_rate_check;
--- (lặp cho 9 constraint còn lại)
-
--- 2. Drop audit triggers
-drop trigger if exists audit_payroll on public.shift_payroll_records;
--- (lặp cho 7 trigger còn lại)
-drop function if exists public._audit_row_change();
-
--- 3. Drop bảng mới
-drop table if exists public.audit_log cascade;
-drop table if exists public.pos_sync_attempts cascade;
-
--- 4. Restore function bản cũ: pg_restore từ pre-deploy dump
-pg_restore -h <host> -U postgres -d <db> -t public.ingest_kiotviet_batch \
-  -t public.save_cash_day_opening -t public.save_cash_count \
-  -t public.compute_cash_theory -t public.create_expense \
-  --section=POST-DATA --clean pre-deploy-*.dump
-
--- 5. Restore RLS expenses_staff_read bản cũ (manual)
-drop policy if exists expenses_staff_read on public.expenses;
-create policy expenses_staff_read on public.expenses for select to authenticated using (
-  public.app_is_staff_or_above()
-  or (public.app_role() = 'employee_viewer' and (
-    business_date >= current_date - 2
-    or exists (select 1 from public.employee_accounts ea
-      join public.expense_history_permissions p on p.employee_id = ea.employee_id
-      where ea.auth_user_id = auth.uid() and expenses.business_date between p.date_from and p.date_to)
-  ))
-);
+```bash
+psql -h <host> -U postgres -d <db> < pre-deploy-$(date +%Y%m%d-%H%M).dump
 ```
 
 ---
 
-## Stage 2 — Edge Function deploy
+## Stage 2 — Linux server setup
 
-### Set environment variables (Supabase project)
+### 2a. Cài Docker
+
 ```bash
-supabase secrets set --project-ref <ref> \
-  N8N_POS_SYNC_WEBHOOK_URL=https://n8n.example.com/webhook/chill-pos-sync \
-  N8N_POS_SYNC_SECRET=<long-random-secret-shared-with-n8n> \
-  POS_SYNC_COOLDOWN_SECONDS=300 \
-  APP_ALLOWED_ORIGINS=https://chill.example.com,http://localhost:3009
+ssh user@your-server
+sudo apt update
+sudo apt install -y docker.io docker-compose-plugin
+sudo usermod -aG docker $USER
+# Logout + login lại
 ```
 
-### Deploy
+### 2b. Clone code + tạo .env
+
 ```bash
-cd "<repo>/supabase"
-supabase functions deploy trigger-pos-sync --project-ref <ref>
+mkdir -p ~/apps && cd ~/apps
+git clone <YOUR-GITHUB-REPO> chill-manager
+cd chill-manager/"Test folder/v2"
+
+cp .env.example .env
+nano .env
 ```
 
-### Smoke test (staging)
+Điền các giá trị:
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://supabase.your-domain.com
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon key>
+NEXT_PUBLIC_APP_URL=https://chill.your-domain.com
+
+SUPABASE_SERVICE_ROLE_KEY=<service_role key>
+INGEST_CLIENT_ID=chill-erp
+INGEST_CLIENT_SECRET=<plain secret từ Stage 1>
+CRON_SECRET=<openssl rand -hex 32>
+
+APP_PORT=3009
+```
+
+### 2c. Build + start container
+
 ```bash
-# Test 1: từ chối thiếu Authorization
-curl -X POST https://<ref>.supabase.co/functions/v1/trigger-pos-sync \
-  -H "Content-Type: application/json" \
-  -d '{}'
-# Mong đợi: 401 "Thiếu Authorization Bearer token."
+docker compose --env-file .env up -d --build
 
-# Test 2: từ chối origin lạ (CORS)
-curl -X OPTIONS https://<ref>.supabase.co/functions/v1/trigger-pos-sync \
-  -H "Origin: https://evil.com" -i | grep -i access-control-allow-origin
-# Mong đợi: header Allow-Origin trống, KHÔNG phải https://evil.com
-
-# Test 3: Login user → call function. Lặp 7 lần liên tiếp lần thứ 7 phải 429
-SUPA_TOKEN=$(curl -s -X POST "$SUPA_URL/auth/v1/token?grant_type=password" \
-  -H "apikey: $ANON" -H "Content-Type: application/json" \
-  -d '{"email":"owner@test","password":"..."}' | jq -r .access_token)
-for i in {1..7}; do
-  curl -X POST https://<ref>.supabase.co/functions/v1/trigger-pos-sync \
-    -H "Authorization: Bearer $SUPA_TOKEN" \
-    -H "Content-Type: application/json" \
-    -H "Origin: http://localhost:3009" \
-    -d '{"business_date":"2026-05-01","force":true,"reason":"smoke"}'
-  echo
-done
-# Mong đợi: 6 response 200/skipped, lần thứ 7 nhận 429
-
-# Test 4: verify pos_sync_attempts log
-psql ... -c "select count(*), max(requested_at) from public.pos_sync_attempts where reason='smoke';"
+# Verify
+docker compose ps                    # status: Up
+docker compose logs -f --tail 50     # phải thấy "Ready in Xms"
+curl -I http://localhost:3009         # 200 OK
 ```
 
 ### Rollback Stage 2
 ```bash
-# Re-deploy version cũ từ git
-git checkout <previous-tag> -- supabase/functions/trigger-pos-sync/index.ts
-supabase functions deploy trigger-pos-sync --project-ref <ref>
-git checkout HEAD -- supabase/functions/trigger-pos-sync/index.ts
+docker compose down
+git checkout <previous-tag>
+docker compose --env-file .env up -d --build
 ```
 
 ---
 
-## Stage 3 — n8n workflow update
+## Stage 3 — Reverse proxy + SSL
 
-⚠️ **Phải làm cùng lúc với Stage 2** (HMAC algorithm đổi từ `body` thành `${ts}.${body}` — không backward compat).
+### 3a. Nginx Proxy Manager (nếu dùng)
 
-### Steps
-1. Mở workflow `chill-pos-sync` trong n8n
-2. Thêm Code node ngay sau Webhook Trigger với code mẫu trong `docs/n8n-ingest.md` mục 2 (HMAC verify + timestamp check)
-3. Set env trong n8n:
-   - `N8N_POS_SYNC_SECRET` = giống edge function
-   - `N8N_CLIENT_ID` = `n8n-local`
-   - `N8N_CLIENT_SECRET` = secret đã insert ở Stage 1 manual
-4. Save và activate workflow
-5. Smoke test:
-   - Bấm "Làm mới" trên app → n8n nhận signature, log "ok"
-   - `curl -X POST <n8n-webhook-url>` không có header → n8n từ chối
-   - Edit body 1 byte sau khi sign → từ chối
+Login NPM UI → Hosts → Add Proxy Host:
+- Domain: `chill.your-domain.com`
+- Forward to: `127.0.0.1:3009`
+- Block common exploits: ✓
+- Websockets support: ✓
+- SSL: Request new Let's Encrypt cert
 
-### Rollback Stage 3
-- Disable Code node verify HMAC tạm thời (nếu Stage 2 đã rollback)
-- Revert Stage 2 trước khi rollback Stage 3
+### 3b. Hoặc Nginx thuần
 
----
+`/etc/nginx/sites-available/chill.your-domain.com`:
+```nginx
+server {
+    server_name chill.your-domain.com;
+    location / {
+        proxy_pass http://127.0.0.1:3009;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+    listen 80;
+}
+```
 
-## Stage 4 — Frontend deploy
-
-### Build & test local
 ```bash
-cd "<repo>"
-npm install                                    # cài @tanstack/react-query
-npm run build                                  # phải xanh, đã verify
-npm run dev                                    # smoke test local trước
+sudo ln -s /etc/nginx/sites-available/chill.your-domain.com /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx -d chill.your-domain.com
 ```
 
-### Set production env (Vercel/host)
+### Verify
+```bash
+curl -I https://chill.your-domain.com   # 200 OK + valid cert
 ```
-NEXT_PUBLIC_SUPABASE_URL=https://<ref>.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon-key>
-NEXT_PUBLIC_APP_URL=https://chill.example.com
-```
-
-### Deploy
-- Vercel: `vercel --prod` hoặc auto-deploy theo branch
-- Self-host: `npm run build && pm2 restart chill-manager`
-- Docker: `docker build -t chill-v2 . && docker compose up -d`
-
-### Smoke test sau deploy
-- [ ] Login owner/manager/staff/viewer trên domain prod
-- [ ] Truy cập từng tab: dashboard / expenses / shifts / cash / reports / pivot / settings
-- [ ] Tạo 1 expense → thấy ngay trong "Lịch sử ngày" (realtime invalidate)
-- [ ] Check-in 1 employee → kiểm `audit_log`: `select * from audit_log where action like 'shift%' order by occurred_at desc limit 1;`
-- [ ] Bấm "Làm mới" → n8n nhận webhook → POS sync xong dashboard tự update (realtime)
-- [ ] DevTools Network: chuyển Pivot → Dashboard → Pivot → Dashboard không refetch nếu chưa stale
-- [ ] DevTools Network: mở `End-of-day wizard` → có chunk JS riêng được load
-- [ ] Login viewer chưa có expense permission → tab `Chi phí` empty (đã tighten RLS)
-
-### Rollback Stage 4
-- Vercel: revert deployment qua dashboard hoặc `vercel rollback`
-- Self-host: `git checkout <previous-tag> && npm run build && pm2 restart`
 
 ---
 
-## Production cutover
+## Stage 4 — Cấu hình KiotViet + bật polling
 
-### Sequence (đề xuất, 1 buổi tối)
+### 4a. Login + cấu hình credentials
 
-| Time | Action | Owner |
+1. Mở `https://chill.your-domain.com` → login owner account
+2. Settings → KiotViet (FNB) → nhập:
+   - **Retailer**: tên cửa hàng (vd: `chillcoffeegarden`)
+   - **Client ID** + **Client Secret** (từ KiotViet manager → Thiết lập → Kết nối API)
+   - Tích **Bật KiotViet sync**
+3. Bấm **Lưu cấu hình**
+4. Bấm **Force sync** để test (phải thấy invoice trong tab Pivot)
+
+### 4b. Setup webhook (optional, cho product/stock)
+
+5. Trong Settings → KiotViet → "Webhook URL" → bấm **Generate webhook secret**
+6. Bấm **Lưu cấu hình** lần nữa
+7. Copy URL hiện ra
+8. KiotViet manager → Thiết lập → Webhook → Add URL + chọn events `product.update`, `customer.update`, `stock.update`
+
+### 4c. Setup polling cron
+
+```bash
+crontab -e
+# Thêm dòng (thay <CRON_SECRET> bằng giá trị thật trong .env):
+*/2 * * * * curl -sS -X POST -H "X-Cron-Secret: <CRON_SECRET>" -H "Content-Type: application/json" -d '{"force":false,"reason":"cron"}' http://localhost:3009/api/kiotviet/sync >> /var/log/kiotviet-sync.log 2>&1
+```
+
+Verify sau 2-3 phút:
+```bash
+tail -f /var/log/kiotviet-sync.log
+
+# Hoặc trên Supabase Studio:
+# select started_at, status, order_count from public.sales_sync_runs
+# where source='kiotviet' order by started_at desc limit 5;
+```
+
+Chi tiết alternative (systemd timer, backfill, tuning): `docs/kiotviet-polling.md`.
+
+---
+
+## Production cutover timeline
+
+| Time | Step | Owner |
 |---|---|---|
-| 22:00 | Backup prod DB | DevOps |
-| 22:05 | Run pre-flight integrity queries trên prod | DevOps |
-| 22:10 | Apply 001 → 002 → 003 → 004 SQL | DevOps |
-| 22:30 | Verify CHECK + RLS + functions theo Stage 1 | DevOps |
-| 22:35 | Bật `supabase_realtime` publication | DevOps |
-| 22:40 | Manual insert integration_clients với secret mới | Dev/Owner |
-| 22:45 | Set Edge Function env vars (APP_ALLOWED_ORIGINS, secret rotate) | DevOps |
-| 22:50 | Deploy Edge Function | DevOps |
-| 22:55 | Update n8n workflow: HMAC Code node + env secret mới | Dev |
-| 23:00 | Smoke test Edge + n8n end-to-end | Dev |
-| 23:10 | Deploy frontend prod | DevOps |
-| 23:15 | Smoke test frontend full checklist | Dev |
-| 23:30 | Notify users đã update | PM |
+| 22:00 | Backup DB + data integrity check | Dev |
+| 22:15 | Stage 1: Apply 4 SQL files | Dev |
+| 22:30 | Stage 1: Setup integration_clients + owner | Dev |
+| 22:45 | Stage 2: Docker build + start | Dev |
+| 23:00 | Stage 3: Nginx + SSL | Ops |
+| 23:15 | Stage 4: KiotViet config + force sync test | Owner |
+| 23:25 | Stage 4: Setup cron + webhook | Dev |
+| 23:30 | Smoke test E2E | Owner + Dev |
 
-### Communication
-**Trước cutover (24h)**:
-- Email/Slack cho owner: "Tối nay 22-23h cập nhật bảo mật. Ứng dụng có thể chậm 1-2 phút."
-- Heads-up cho viewer accounts: "Quyền xem chi phí thay đổi. Nếu sau cập nhật không thấy chi phí, liên hệ owner cấp permission."
-
-**Sau cutover**:
-- Confirm tới team: deploy thành công, các thay đổi chính
-- Document version mới trong CHANGELOG
+Total: ~1.5h từ pre-flight đến live.
 
 ---
 
-## Monitoring sau deploy (24-48h)
+## Smoke tests (post-deploy)
 
-### Metrics cần theo dõi
+Trên ERP UI:
+- [ ] Login owner account → Dashboard load → metrics hiển thị (có thể = 0 nếu DB mới)
+- [ ] Tab Expenses → tạo expense test → save → toast success
+- [ ] Tab Shifts → check-in 1 employee → check-out → lương hiển thị
+- [ ] Tab Cash → đếm mệnh giá → "Kiểm két nhanh" → row mới trong "Lịch sử trong ngày"
+- [ ] Settings → KiotViet → Force sync → vào tab Pivot thấy invoice
+- [ ] Tab Reports → "Chốt két & tạo báo cáo" → in báo cáo
+- [ ] Open second tab → make change tab 1 → tab 2 update <2s (realtime working)
+
+Trên server:
+- [ ] `docker compose logs --tail 100` không có ERROR
+- [ ] Cron log `/var/log/kiotviet-sync.log` hiển thị success mỗi 2 phút
+- [ ] Supabase Studio: `audit_log` có row mới sau mỗi action quan trọng
+
+Trên KiotViet:
+- [ ] Tạo invoice test → trong 2-4 phút phải xuất hiện ở Pivot view
+- [ ] Update product → ERP webhook log thấy event (nếu setup webhook ở 4b)
+
+---
+
+## Monitoring queries (chạy hàng ngày)
 
 ```sql
--- 1. Audit log sức khoẻ — phải có row khi user thao tác
-select date_trunc('hour', occurred_at) as hour, action, count(*)
-from public.audit_log
-where occurred_at > now() - interval '24 hours'
-group by 1, 2 order by 1 desc;
-
--- 2. Pos sync attempts — phát hiện spam/abuse
-select user_id, count(*) as attempts, max(requested_at) as last
-from public.pos_sync_attempts
-where requested_at > now() - interval '24 hours'
-group by user_id
-having count(*) > 50
-order by attempts desc;
-
--- 3. Sales sync runs — không có status 'failed' liên tiếp
-select status, count(*), max(finished_at)
+-- Sync runs gần nhất (phải có row mỗi 2 phút)
+select started_at, finished_at, status, order_count
 from public.sales_sync_runs
-where started_at > now() - interval '24 hours'
+where source = 'kiotviet'
+order by started_at desc limit 20;
+
+-- Nếu sync fail liên tục 3+ lần → alert
+select status, count(*) from public.sales_sync_runs
+where source = 'kiotviet' and started_at > now() - interval '1 hour'
 group by status;
 
--- 4. CHECK constraint violations (lý ra phải 0 vì đã pre-flight)
--- Nếu có error log với "violates check constraint" → user/integration đang gửi data sai
+-- Audit log row mới (phải có activity hằng ngày nếu app đang dùng)
+select action, count(*)
+from public.audit_log
+where occurred_at > now() - interval '1 day'
+group by action order by 2 desc;
+
+-- Rate limit attempts (theo dõi spam)
+select user_id, count(*)
+from public.pos_sync_attempts
+where requested_at > now() - interval '1 hour'
+group by user_id order by 2 desc limit 10;
 ```
-
-### Edge Function logs
-```bash
-supabase functions logs trigger-pos-sync --project-ref <ref> --since 1h | grep -E '429|500|error'
-```
-
-### Frontend monitoring
-- Sentry / NewRelic cho client error
-- Browser DevTools Performance: First Contentful Paint < 1.5s
-- React Query DevTools: cache hit rate > 50%
-
-### Tín hiệu phải rollback
-- Tỷ lệ 5xx Edge Function > 1%
-- Audit log không có row khi user thao tác (trigger gãy)
-- User báo "không tạo được expense" (CHECK constraint sai bound)
-- Realtime không invalidate (publication không enable)
 
 ---
 
 ## Hot-fix playbook
 
-### Triệu chứng: User báo "Không tạo được expense"
-1. Check Edge Function log gần nhất
-2. `select * from audit_log where action='expenses.insert' order by occurred_at desc limit 5;`
-3. Nếu CHECK constraint quá chặt: `alter table public.expenses drop constraint expenses_amount_check;` (tạm) → fix bound trong 002 → re-apply
+### Triệu chứng: Cron không sync, log báo "Auth failed"
+1. Check `CRON_SECRET` env trong `.env` server khớp với header trong cron command
+2. Restart container sau khi sửa `.env`: `docker compose --env-file .env up -d`
 
-### Triệu chứng: Owner báo "Báo cáo chốt két không cập nhật realtime"
-1. Verify publication: `select * from pg_publication_tables where tablename='cash_close_reports';`
-2. Nếu thiếu: `alter publication supabase_realtime add table public.cash_close_reports;`
-3. Reconnect WS phía client (refresh page)
+### Triệu chứng: Sync báo "Integration client không hợp lệ"
+1. Verify `INGEST_CLIENT_ID` + `INGEST_CLIENT_SECRET` trong `.env` khớp với row `integration_clients`
+2. Test bằng `select * from integration_clients where client_id = 'chill-erp' and is_active = true;` (phải có 1 row)
 
-### Triệu chứng: n8n báo "Invalid HMAC"
-1. Verify env `N8N_POS_SYNC_SECRET` ở Edge và n8n giống nhau
-2. Verify Code node n8n dùng `${ts}.${body}` không phải `body` only
-3. Test signature manual: 
-   ```bash
-   echo -n "2026-05-01T10:00:00.000Z.<body>" | openssl dgst -sha256 -hmac "<secret>"
-   ```
+### Triệu chứng: Sync báo "401 Unauthorized" từ KiotViet
+1. Settings → KiotViet → check Client ID + Client Secret đúng chưa
+2. Token có thể expired — bấm Force sync lần nữa (auto-refresh)
+3. Verify retailer name khớp với cửa hàng trên KiotViet manager
 
-### Triệu chứng: Viewer không thấy expense
-1. Verify `expense_history_permissions` có row cho viewer đó
-2. Owner cần `insert into expense_history_permissions(employee_id, date_from, date_to)`
-3. (Tuỳ chọn) tạo cron tự upsert rolling 7-day cho mỗi viewer
+### Triệu chứng: Webhook KiotViet trả 200 nhưng app không xử lý
+1. `docker logs chill-manager-v2 | grep kiotviet-webhook` xem log
+2. Verify webhook_secret trong DB khớp với secret embedded trong URL đăng ký KiotViet
+3. KiotViet có gửi đúng events không? Check Notifications.Action trong log
+
+### Triệu chứng: Tab Cash → "Sửa tiền đầu ngày" báo lỗi RLS
+1. Verify user có role `owner` trong employee_accounts
+2. Verify policy `cash_openings_owner_update` tồn tại
+
+### Triệu chứng: `audit_log does not exist` khi insert/update
+1. Re-apply `database/001_schema.sql` (idempotent — không hại) để tạo bảng audit_log
+2. Hoặc apply `database/000_reset.sql` rồi 001-004 nếu schema cũ corrupt
 
 ---
 
 ## Definition of Done
 
-- [ ] Backup pre-deploy đã lưu nơi an toàn
-- [ ] 4 SQL files đã apply trên prod
-- [ ] Edge Function deployed với env mới
-- [ ] n8n workflow update HMAC + secret mới
-- [ ] Frontend prod deploy, smoke test pass
-- [ ] Realtime publication enable cho 4 bảng
-- [ ] integration_clients có row active không phải default
-- [ ] Audit log có row sau 1h sử dụng thật
-- [ ] Không có 429/5xx liên tục trên Edge logs trong 24h
-- [ ] Owner/team đã được training về thay đổi viewer permission
-- [ ] CHANGELOG cập nhật, tag git release `v2.1.0` hoặc tương tự
+- [ ] 4 SQL files applied + verify queries pass
+- [ ] integration_clients row tồn tại
+- [ ] Owner account login OK
+- [ ] Realtime publication added cho 5 bảng
+- [ ] Docker container `Up` + log clean
+- [ ] HTTPS hoạt động qua reverse proxy
+- [ ] KiotViet config + force sync OK
+- [ ] Cron polling chạy mỗi 2 phút (verify trong sales_sync_runs)
+- [ ] Webhook đăng ký (optional)
+- [ ] Smoke test E2E pass
+- [ ] Backup `.dump` đã lưu
+- [ ] Owner đã được hướng dẫn dùng app
