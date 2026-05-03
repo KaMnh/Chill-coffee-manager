@@ -6,6 +6,7 @@ import { formatVND } from "@/lib/format";
 import type { Account, AppSettings, SettingsAccount, UserRole } from "@/lib/types";
 import { EmptyState, type Notice } from "@/shared";
 import { NAV_ITEMS, ROLE_LABELS, hasBasePageAccess, normalizeSidebarItems, type ViewKey } from "../navigation";
+import { AccountManagement } from "./account-management";
 import { ExpenseTemplateAdmin } from "./expense-template-admin";
 import { KiotvietSettings } from "./kiotviet-settings";
 
@@ -182,6 +183,12 @@ export function SettingsView({
           <strong>Tổng POS - đối soát</strong>
         </div>
       </section>
+      <AccountManagement
+        supabase={supabase}
+        accounts={settingsAccounts}
+        onAccountsChange={onAccountsChange}
+        onNotice={onNotice}
+      />
       <ExpenseTemplateAdmin supabase={supabase} onNotice={onNotice} />
       <KiotvietSettings supabase={supabase} onNotice={onNotice} />
     </div>

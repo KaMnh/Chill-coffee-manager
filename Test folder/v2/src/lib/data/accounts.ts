@@ -1,6 +1,71 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Account, SettingsAccount } from "@/lib/types";
+import type { Account, SettingsAccount, UserRole } from "@/lib/types";
 import { toAppError } from "./_common";
+
+async function authHeader(supabase: SupabaseClient): Promise<Record<string, string>> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+export type CreateUserPayload = {
+  email: string;
+  password: string;
+  name: string;
+  role: UserRole;
+  position?: string;
+  hourly_rate?: number;
+  code?: string;
+};
+
+/** Tạo user mới qua /api/users (owner/manager only). */
+export async function createUserAccount(supabase: SupabaseClient, payload: CreateUserPayload) {
+  const headers = { ...(await authHeader(supabase)), "Content-Type": "application/json" };
+  const res = await fetch("/api/users", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload)
+  });
+  const json = (await res.json()) as { status: string; error?: string; auth_user_id?: string; employee_id?: string };
+  if (!res.ok || json.status !== "ok") {
+    throw new Error(json.error ?? `Tạo user thất bại (HTTP ${res.status}).`);
+  }
+  return json;
+}
+
+/** Update role / status / employee fields qua PATCH /api/users/<id>. */
+export async function updateUserAccount(
+  supabase: SupabaseClient,
+  authUserId: string,
+  patch: {
+    role?: UserRole;
+    status?: "active" | "disabled";
+    name?: string;
+    position?: string;
+    hourly_rate?: number;
+  }
+) {
+  const headers = { ...(await authHeader(supabase)), "Content-Type": "application/json" };
+  const res = await fetch(`/api/users/${authUserId}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify(patch)
+  });
+  const json = (await res.json()) as { status: string; error?: string };
+  if (!res.ok || json.status !== "ok") {
+    throw new Error(json.error ?? `Cập nhật thất bại (HTTP ${res.status}).`);
+  }
+}
+
+/** Soft delete: disable account. KHÔNG xóa hẳn auth user. */
+export async function deactivateUserAccount(supabase: SupabaseClient, authUserId: string) {
+  const headers = await authHeader(supabase);
+  const res = await fetch(`/api/users/${authUserId}`, { method: "DELETE", headers });
+  const json = (await res.json()) as { status: string; error?: string };
+  if (!res.ok || json.status !== "ok") {
+    throw new Error(json.error ?? `Vô hiệu hóa thất bại (HTTP ${res.status}).`);
+  }
+}
 
 export async function loadCurrentAccount(supabase: SupabaseClient): Promise<Account | null> {
   const {

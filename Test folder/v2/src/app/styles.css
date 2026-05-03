@@ -579,6 +579,18 @@ th { color: #7a5941; font-size: 12px; text-transform: uppercase; }
 .badgeButton { background: transparent; border: 0; padding: 0; cursor: pointer; }
 .badgeButton:disabled { cursor: not-allowed; opacity: 0.6; }
 
+/* Account management table (Settings → Quản lý tài khoản) */
+.userCreateForm { display: grid; gap: 12px; padding: 14px; background: #fffaf2; border: 1px dashed var(--line); border-radius: 12px; margin-top: 12px; }
+.accountTable { margin-top: 12px; }
+.accountTable input, .accountTable select { font-size: 13px; padding: 8px 10px; }
+.accountTable td { vertical-align: middle; }
+.accountTable .inactiveRow { opacity: 0.55; }
+.formGrid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.formGrid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+@media (max-width: 760px) {
+  .formGrid2, .formGrid3 { grid-template-columns: 1fr; }
+}
+
 /* KiotViet Settings */
 .kiotvietForm { display: grid; gap: 14px; margin-top: 14px; }
 .kiotvietForm .fieldStack { gap: 6px; }
