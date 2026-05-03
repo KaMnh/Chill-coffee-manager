@@ -14,6 +14,25 @@ function canManageEmployees(account: Account | null) {
   return account?.role === "owner" || account?.role === "manager";
 }
 
+/**
+ * Default time cho check-in modal.
+ * - Nếu business_date = hôm nay → dùng now
+ * - Nếu business_date khác → default 08:00 ngày đó (làm tròn xuống đầu ca)
+ */
+function defaultCheckInTime(businessDate: string): string {
+  const now = new Date();
+  const todayIso = now.toISOString().slice(0, 10);
+  if (todayIso === businessDate) return toDatetimeLocal(now.toISOString());
+  return `${businessDate}T08:00`;
+}
+
+/** Validate: giờ check-in phải trong cùng business_date. */
+function isCheckInTimeValid(checkIn: string, businessDate: string): boolean {
+  if (!checkIn) return false;
+  const dateStr = checkIn.slice(0, 10); // YYYY-MM-DD từ datetime-local
+  return dateStr === businessDate;
+}
+
 export function ShiftPanel({
   supabase,
   account,
@@ -37,6 +56,10 @@ export function ShiftPanel({
   const [editingPayroll, setEditingPayroll] = useState<PayrollRecord | null>(null);
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
   const [showCreateEmployee, setShowCreateEmployee] = useState(false);
+  // Check-in modal state — cho user tùy chỉnh giờ vào trước khi confirm
+  const [checkInTarget, setCheckInTarget] = useState<Employee | null>(null);
+  const [checkInTime, setCheckInTime] = useState("");
+  const [isCheckingIn, setIsCheckingIn] = useState(false);
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
   const [allowance, setAllowance] = useState("");
@@ -53,20 +76,35 @@ export function ShiftPanel({
   const totalPay = basePay + moneyFromInput(allowance);
   const invalidTime = Boolean(startTime && endTime && new Date(endTime).getTime() < new Date(startTime).getTime());
 
-  async function checkIn(employee: Employee) {
+  function openCheckIn(employee: Employee) {
+    setCheckInTarget(employee);
+    setCheckInTime(defaultCheckInTime(date));
+  }
+
+  function closeCheckIn() {
+    setCheckInTarget(null);
+    setCheckInTime("");
+  }
+
+  async function submitCheckIn() {
+    if (!checkInTarget || !isCheckInTimeValid(checkInTime, date)) return;
+    setIsCheckingIn(true);
     try {
       await checkInEmployee(supabase, {
-        employee_id: employee.id,
+        employee_id: checkInTarget.id,
         business_date: date,
-        check_in_at: new Date().toISOString()
+        check_in_at: fromDatetimeLocal(checkInTime)
       });
-      onNotice({ type: "success", message: employee.name + " đã vào ca." });
+      onNotice({ type: "success", message: checkInTarget.name + " đã vào ca." });
+      closeCheckIn();
       onRefresh();
     } catch (error) {
       onNotice({
         type: "error",
         message: error instanceof Error ? error.message : "Không vào ca được."
       });
+    } finally {
+      setIsCheckingIn(false);
     }
   }
 
@@ -121,7 +159,7 @@ export function ShiftPanel({
               Sửa
             </button>
           )}
-          <button type="button" className="ghostButton" disabled={isIn} onClick={() => checkIn(employee)}>
+          <button type="button" className="ghostButton" disabled={isIn} onClick={() => openCheckIn(employee)}>
             Vào ca
           </button>
           <button type="button" className="ghostButton" disabled={!shift || !isIn} onClick={() => shift && openCheckout(shift)}>
@@ -288,6 +326,63 @@ export function ShiftPanel({
             <button className="primaryButton" type="button" disabled={invalidTime} onClick={submitCheckout}>
               Xác nhận ra ca và lưu lương
             </button>
+          </section>
+        </div>
+      )}
+      {checkInTarget && (
+        <div className="modalBackdrop" role="presentation">
+          <section className="modalSheet" role="dialog" aria-modal="true">
+            <div className="panelHeader">
+              <div>
+                <p className="eyebrow">Xác nhận vào ca</p>
+                <h2>{checkInTarget.name}</h2>
+                <span className="muted">
+                  {checkInTarget.position ?? "Nhân viên"} · {formatVND(checkInTarget.hourly_rate)}/giờ
+                </span>
+              </div>
+              <button
+                className="ghostButton"
+                type="button"
+                disabled={isCheckingIn}
+                onClick={closeCheckIn}
+              >
+                Đóng
+              </button>
+            </div>
+            <label className="fieldStack">
+              Giờ vào ca
+              <input
+                type="datetime-local"
+                value={checkInTime}
+                onChange={(event) => setCheckInTime(event.target.value)}
+                autoFocus
+              />
+              <small className="muted">
+                Mặc định là giờ hiện tại. Có thể chỉnh nếu nhân viên quên check-in từ đầu ca.
+                Phải nằm trong ngày làm việc <strong>{date}</strong>.
+              </small>
+            </label>
+            {checkInTime && !isCheckInTimeValid(checkInTime, date) && (
+              <p className="dangerText">Giờ vào ca phải nằm trong ngày {date}.</p>
+            )}
+            <div className="buttonRow">
+              <button
+                className="primaryButton"
+                type="button"
+                disabled={isCheckingIn || !isCheckInTimeValid(checkInTime, date)}
+                onClick={submitCheckIn}
+              >
+                {isCheckingIn ? "Đang xác nhận..." : "Xác nhận vào ca"}
+              </button>
+              <button
+                className="ghostButton"
+                type="button"
+                disabled={isCheckingIn}
+                onClick={closeCheckIn}
+              >
+                Hủy
+              </button>
+            </div>
           </section>
         </div>
       )}

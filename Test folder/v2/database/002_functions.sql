@@ -429,13 +429,24 @@ as $$
 declare
   v_employee uuid := (p_payload->>'employee_id')::uuid;
   v_date date := coalesce((p_payload->>'business_date')::date, current_date);
+  v_check_in timestamptz := coalesce((p_payload->>'check_in_at')::timestamptz, now());
   v_id uuid;
 begin
   if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền vào ca.'; end if;
+
+  -- Validate giờ vào ca trong cùng business_date (chống bypass frontend)
+  if v_check_in::date <> v_date then
+    raise exception 'Giờ vào ca % không khớp với ngày làm việc %.', v_check_in::date, v_date;
+  end if;
+  -- Reject giờ trong tương lai (>5 phút sai số đồng hồ)
+  if v_check_in > now() + interval '5 minutes' then
+    raise exception 'Giờ vào ca không được trong tương lai.';
+  end if;
+
   select id into v_id from public.shift_assignments where employee_id = v_employee and status = 'checked_in' order by check_in_at desc limit 1;
   if v_id is null then
     insert into public.shift_assignments (employee_id, business_date, check_in_at, status, created_by, updated_by)
-    values (v_employee, v_date, coalesce((p_payload->>'check_in_at')::timestamptz, now()), 'checked_in', auth.uid(), auth.uid()) returning id into v_id;
+    values (v_employee, v_date, v_check_in, 'checked_in', auth.uid(), auth.uid()) returning id into v_id;
   end if;
   return jsonb_build_object('shift_assignment_id', v_id);
 end;
@@ -821,7 +832,9 @@ create or replace function public.ingest_kiotviet_batch(p_payload jsonb)
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, auth
+-- 'extensions' phải có trong search_path để tìm được crypt() (pgcrypto).
+-- Supabase mặc định cài pgcrypto vào schema 'extensions' (không phải public).
+set search_path = public, extensions, auth
 as $$
 declare
   v_client_id text := p_payload->>'client_id';
