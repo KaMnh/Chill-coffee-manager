@@ -4,26 +4,28 @@ import {
   Banknote,
   FileText,
   LayoutDashboard,
+  PiggyBank,
   Settings,
   Users,
   Wallet
 } from "@/shared/icons";
 import type { Account, AppSettings, UserRole } from "@/lib/types";
 
-export type ViewKey = "dashboard" | "expenses" | "shifts" | "cash" | "reports" | "pivot" | "settings";
+export type ViewKey = "dashboard" | "expenses" | "shifts" | "cash" | "safe" | "reports" | "pivot" | "settings";
 
 export const NAV_ITEMS: Array<{ key: ViewKey; label: string; icon: LucideIcon; roles: UserRole[] }> = [
   { key: "dashboard", label: "Bảng vận hành", icon: LayoutDashboard, roles: ["owner", "manager", "staff_operator", "employee_viewer"] },
   { key: "expenses", label: "Chi phí", icon: Wallet, roles: ["owner", "manager", "staff_operator"] },
   { key: "shifts", label: "Ca & lương", icon: Users, roles: ["owner", "manager", "staff_operator"] },
   { key: "cash", label: "Chốt két", icon: Banknote, roles: ["owner", "manager", "staff_operator"] },
+  { key: "safe", label: "Sổ quỹ", icon: PiggyBank, roles: ["owner"] },
   { key: "reports", label: "Báo cáo chốt két", icon: FileText, roles: ["owner", "manager", "staff_operator"] },
   { key: "pivot", label: "Pivot", icon: BarChart3, roles: ["owner", "manager"] },
   { key: "settings", label: "Thiết lập", icon: Settings, roles: ["owner", "manager"] }
 ];
 
 export const DEFAULT_SIDEBAR_BY_ROLE: Record<UserRole, ViewKey[]> = {
-  owner: ["dashboard", "expenses", "shifts", "cash", "reports", "pivot", "settings"],
+  owner: ["dashboard", "expenses", "shifts", "cash", "safe", "reports", "pivot", "settings"],
   manager: ["dashboard", "expenses", "shifts", "cash", "reports", "pivot", "settings"],
   staff_operator: ["dashboard", "expenses", "shifts", "cash", "reports"],
   employee_viewer: ["dashboard"]

@@ -30,6 +30,7 @@ const EndOfDayWizard = dynamic(
   { ssr: false, loading: () => <div className="modalBackdrop" /> }
 );
 const PivotView = dynamic(() => import("@/features/pivot/pivot-view").then((m) => m.PivotView), { ssr: false });
+const SafePanel = dynamic(() => import("@/features/safe/safe-panel").then((m) => m.SafePanel), { ssr: false });
 const SettingsView = dynamic(
   () => import("@/features/settings/settings-view").then((m) => m.SettingsView),
   { ssr: false }
@@ -482,6 +483,9 @@ export default function Home() {
             onRefresh={refresh}
             onNotice={setNotice}
           />
+        )}
+        {activeView === "safe" && (
+          <SafePanel supabase={supabase} account={account} onNotice={setNotice} />
         )}
         {activeView === "pivot" && <PivotView dashboard={dashboard} />}
         {activeView === "settings" && (

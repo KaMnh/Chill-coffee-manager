@@ -43,5 +43,11 @@ export {
 
   // Misc
   KeyRound,
-  Zap
+  Zap,
+  PiggyBank,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Calculator,
+  SlidersHorizontal,
+  Wallet2
 } from "lucide-react";

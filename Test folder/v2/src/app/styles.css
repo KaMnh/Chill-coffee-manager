@@ -579,6 +579,31 @@ th { color: #7a5941; font-size: 12px; text-transform: uppercase; }
 .badgeButton { background: transparent; border: 0; padding: 0; cursor: pointer; }
 .badgeButton:disabled { cursor: not-allowed; opacity: 0.6; }
 
+/* Sổ quỹ — Safe panel */
+.safeBalanceCard { display: grid; grid-template-columns: minmax(0, 1.5fr) auto; gap: 18px; align-items: center; padding: 22px; }
+.safeBalanceLeft { display: grid; gap: 6px; }
+.safeBalanceHeader { display: flex; align-items: center; gap: 8px; }
+.safeBalanceHeader .eyebrow { margin: 0; }
+.safeBalanceAmount { font-size: 36px; line-height: 1.1; color: var(--accent-dark); white-space: nowrap; }
+.safeBalanceMeta { font-size: 12px; }
+.safeBalanceActions { display: flex; gap: 8px; flex-wrap: wrap; }
+.safeHistoryPanel { padding: 18px; }
+.safeHistoryFilters { display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
+.safeHistoryFilters .fieldStack.inline { gap: 0; }
+.safeHistoryFilters input, .safeHistoryFilters select { font-size: 13px; padding: 8px 10px; }
+.safeHistoryTable td.alignRight, .safeHistoryTable th.alignRight { text-align: right; }
+.safeHistoryTable td.nowrap, .safeHistoryTable th.nowrap { white-space: nowrap; }
+.safeReasonInline { font-size: 12px; }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+.modalSheet.wideModal { width: min(720px, 100%); }
+.safeCountSummary { background: #fffefa; border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+.safeCountSummary .summaryRows.compact { grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 14px; }
+@media (max-width: 760px) {
+  .safeBalanceCard { grid-template-columns: 1fr; }
+  .safeBalanceActions { width: 100%; }
+  .safeBalanceActions button { flex: 1; min-width: 0; }
+}
+
 /* Account management table (Settings → Quản lý tài khoản) */
 .userCreateForm { display: grid; gap: 12px; padding: 14px; background: #fffaf2; border: 1px dashed var(--line); border-radius: 12px; margin-top: 12px; }
 .accountTable { margin-top: 12px; }
