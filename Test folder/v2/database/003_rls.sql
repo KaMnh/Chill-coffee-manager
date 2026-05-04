@@ -170,6 +170,27 @@ create policy audit_log_admin_read on public.audit_log for select to authenticat
 drop policy if exists audit_log_no_direct_write on public.audit_log;
 create policy audit_log_no_direct_write on public.audit_log for insert to authenticated with check (false);
 
+-- Sổ quỹ — owner only đọc trực tiếp. Manager + staff đọc được balance qua
+-- safe_balance_now() RPC (function security definer bypass RLS). Trực tiếp
+-- table → owner only. Insert/update đi qua security definer RPCs → không
+-- cần policy write.
+alter table public.safe_transactions enable row level security;
+alter table public.safe_counts enable row level security;
+
+drop policy if exists safe_transactions_owner_read on public.safe_transactions;
+create policy safe_transactions_owner_read on public.safe_transactions
+  for select to authenticated using (public.app_role() = 'owner');
+drop policy if exists safe_transactions_no_direct_write on public.safe_transactions;
+create policy safe_transactions_no_direct_write on public.safe_transactions
+  for insert to authenticated with check (false);
+
+drop policy if exists safe_counts_owner_read on public.safe_counts;
+create policy safe_counts_owner_read on public.safe_counts
+  for select to authenticated using (public.app_role() = 'owner');
+drop policy if exists safe_counts_no_direct_write on public.safe_counts;
+create policy safe_counts_no_direct_write on public.safe_counts
+  for insert to authenticated with check (false);
+
 
 alter table public.handover_sessions enable row level security;
 alter table public.handover_tasks enable row level security;

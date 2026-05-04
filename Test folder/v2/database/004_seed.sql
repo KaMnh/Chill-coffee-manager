@@ -88,3 +88,22 @@ insert into public.app_settings (key, value, is_public) values
    ),
    false)
 on conflict (key) do nothing;
+
+-- -----------------------------------------------------------------------------
+-- 5. Safe withdraw categories (cho rút sổ quỹ mục đích khác)
+--    Public — UI dùng để render dropdown, không có sensitive info.
+-- -----------------------------------------------------------------------------
+insert into public.app_settings (key, value, is_public) values
+  ('safe_withdraw_categories',
+   jsonb_build_array(
+     jsonb_build_object('key', 'utilities',   'label', 'Tiền điện / nước / mạng'),
+     jsonb_build_object('key', 'rent',        'label', 'Tiền thuê / dịch vụ'),
+     jsonb_build_object('key', 'inventory',   'label', 'Mua nguyên liệu lớn'),
+     jsonb_build_object('key', 'maintenance', 'label', 'Sửa chữa / bảo trì'),
+     jsonb_build_object('key', 'other',       'label', 'Khác')
+   ),
+   true)
+on conflict (key) do update
+  set value = excluded.value,
+      is_public = excluded.is_public,
+      updated_at = now();

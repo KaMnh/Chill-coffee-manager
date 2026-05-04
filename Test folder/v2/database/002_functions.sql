@@ -1356,3 +1356,552 @@ as $$
 $$;
 
 grant execute on function public.get_last_sync_cursor(text) to authenticated;
+
+-- =============================================================================
+-- Sổ quỹ (cash safe) RPCs — owner-only ledger
+--
+-- Architecture: All insert/update phải qua các function dưới (security definer +
+-- check role). Direct INSERT bị RLS block. Owner role-check qua app_role().
+--
+-- balance_after là số dư SAU giao dịch — denormalized để query nhanh.
+-- Mỗi insert: tính next_balance = current_balance + amount, validate >= 0,
+-- rồi insert với balance_after = next_balance.
+-- =============================================================================
+
+-- Helper: lấy balance hiện tại (= balance_after của transaction gần nhất, hoặc 0).
+-- Owner + manager đều xem được (manager cần biết để hiển thị status).
+create or replace function public.safe_balance_now()
+returns numeric
+language sql
+stable
+security definer
+set search_path = public, auth
+as $$
+  select coalesce(
+    (select balance_after from public.safe_transactions order by occurred_at desc, id desc limit 1),
+    0
+  );
+$$;
+
+grant execute on function public.safe_balance_now() to authenticated;
+
+-- Setup ban đầu: chỉ chạy được 1 lần khi chưa có transaction nào.
+-- Owner only.
+create or replace function public.safe_setup_initial(p_amount numeric, p_note text default null)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare v_id uuid;
+begin
+  if public.app_role() <> 'owner' then
+    raise exception 'Chỉ owner được thiết lập sổ quỹ ban đầu.';
+  end if;
+  if exists (select 1 from public.safe_transactions) then
+    raise exception 'Sổ quỹ đã có giao dịch. Dùng safe_adjust thay vì safe_setup_initial.';
+  end if;
+  if p_amount < 0 or p_amount > 1000000000 then
+    raise exception 'Số dư ban đầu phải 0–1.000.000.000.';
+  end if;
+
+  insert into public.safe_transactions (
+    transaction_type, amount, balance_after, description, created_by
+  ) values (
+    'initial_setup', p_amount, p_amount,
+    coalesce(nullif(trim(p_note), ''), 'Khởi tạo sổ quỹ'),
+    auth.uid()
+  ) returning id into v_id;
+
+  return jsonb_build_object('id', v_id, 'balance', p_amount);
+end;
+$$;
+
+grant execute on function public.safe_setup_initial(numeric, text) to authenticated;
+
+-- Rút sổ quỹ cho mục đích khác (tiền điện, thuê, mua nguyên liệu, ...).
+-- p_category: 'utilities' | 'rent' | 'inventory' | 'maintenance' | 'other'
+create or replace function public.safe_withdraw_other(
+  p_amount numeric,
+  p_category text,
+  p_description text default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_balance numeric;
+  v_next numeric;
+  v_id uuid;
+begin
+  if public.app_role() <> 'owner' then
+    raise exception 'Chỉ owner được rút sổ quỹ.';
+  end if;
+  if p_amount <= 0 or p_amount > 1000000000 then
+    raise exception 'Số tiền rút phải 1–1.000.000.000.';
+  end if;
+  if p_category not in ('utilities', 'rent', 'inventory', 'maintenance', 'other') then
+    raise exception 'Loại chi không hợp lệ.';
+  end if;
+  if length(coalesce(p_description, '')) > 500 then
+    raise exception 'Mô tả vượt 500 ký tự.';
+  end if;
+
+  -- Lock row gần nhất để chống race condition
+  select balance_after into v_balance
+  from public.safe_transactions
+  order by occurred_at desc, id desc
+  limit 1
+  for update;
+
+  v_balance := coalesce(v_balance, 0);
+  v_next := v_balance - p_amount;
+  if v_next < 0 then
+    raise exception 'Sổ quỹ không đủ. Số dư hiện tại %, rút %.', v_balance, p_amount;
+  end if;
+
+  insert into public.safe_transactions (
+    transaction_type, amount, balance_after,
+    reason_category, description, created_by
+  ) values (
+    'withdraw_other', -p_amount, v_next,
+    p_category, p_description, auth.uid()
+  ) returning id into v_id;
+
+  return jsonb_build_object('id', v_id, 'balance_after', v_next);
+end;
+$$;
+
+grant execute on function public.safe_withdraw_other(numeric, text, text) to authenticated;
+
+-- Adjust sổ quỹ khi count thực tế lệch (mất, lẫn lộn, sai sót).
+-- Owner only. Note bắt buộc (audit trail).
+create or replace function public.safe_adjust(p_new_balance numeric, p_note text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_balance numeric;
+  v_diff numeric;
+  v_id uuid;
+begin
+  if public.app_role() <> 'owner' then
+    raise exception 'Chỉ owner được điều chỉnh sổ quỹ.';
+  end if;
+  if p_new_balance < 0 or p_new_balance > 1000000000 then
+    raise exception 'Số dư mới phải 0–1.000.000.000.';
+  end if;
+  if length(coalesce(trim(p_note), '')) < 5 then
+    raise exception 'Phải nhập lý do điều chỉnh (>= 5 ký tự) cho audit trail.';
+  end if;
+  if length(p_note) > 500 then
+    raise exception 'Lý do vượt 500 ký tự.';
+  end if;
+
+  select balance_after into v_balance
+  from public.safe_transactions
+  order by occurred_at desc, id desc
+  limit 1
+  for update;
+
+  v_balance := coalesce(v_balance, 0);
+  v_diff := p_new_balance - v_balance;
+  if v_diff = 0 then
+    raise exception 'Số dư mới giống số dư hiện tại — không cần điều chỉnh.';
+  end if;
+
+  insert into public.safe_transactions (
+    transaction_type, amount, balance_after, description, created_by
+  ) values (
+    'adjustment', v_diff, p_new_balance, p_note, auth.uid()
+  ) returning id into v_id;
+
+  return jsonb_build_object('id', v_id, 'balance_after', p_new_balance, 'difference', v_diff);
+end;
+$$;
+
+grant execute on function public.safe_adjust(numeric, text) to authenticated;
+
+-- Snapshot mệnh giá thực tế. KHÔNG auto-adjust — chỉ ghi nhận difference.
+-- Owner muốn fix → gọi safe_adjust riêng.
+create or replace function public.safe_count(p_denominations_json jsonb, p_note text default null)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_total numeric := 0;
+  v_balance numeric;
+  v_diff numeric;
+  v_id uuid;
+begin
+  if public.app_role() <> 'owner' then
+    raise exception 'Chỉ owner được đếm sổ quỹ.';
+  end if;
+
+  -- Whitelist mệnh giá VND 1k-500k, count 0-10000 (giống save_cash_count)
+  perform 1
+  from jsonb_each_text(coalesce(p_denominations_json, '{}'::jsonb)) as d(k, v)
+  where not (
+    k ~ '^(1000|2000|5000|10000|20000|50000|100000|200000|500000)$'
+    and v ~ '^[0-9]+$'
+    and v::numeric between 0 and 10000
+  );
+  if found then
+    raise exception 'denominations_json: chỉ chấp nhận mệnh giá VND 1k-500k và số lượng 0-10000.';
+  end if;
+
+  select coalesce(sum(key::numeric * value::numeric), 0)
+  into v_total
+  from jsonb_each_text(coalesce(p_denominations_json, '{}'::jsonb));
+
+  v_balance := public.safe_balance_now();
+  v_diff := v_total - v_balance;
+
+  insert into public.safe_counts (
+    denominations_json, total_physical, expected_balance, difference, note, counted_by
+  ) values (
+    coalesce(p_denominations_json, '{}'::jsonb),
+    v_total, v_balance, v_diff, p_note, auth.uid()
+  ) returning id into v_id;
+
+  return jsonb_build_object(
+    'id', v_id,
+    'total_physical', v_total,
+    'expected_balance', v_balance,
+    'difference', v_diff
+  );
+end;
+$$;
+
+grant execute on function public.safe_count(jsonb, text) to authenticated;
+
+-- List transactions với optional filter ngày + type
+create or replace function public.safe_list_transactions(
+  p_from date default null,
+  p_to date default null,
+  p_type text default null
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public, auth
+as $$
+declare v_result jsonb;
+begin
+  if public.app_role() <> 'owner' then
+    raise exception 'Chỉ owner xem được lịch sử sổ quỹ.';
+  end if;
+
+  select coalesce(jsonb_agg(item order by item->>'occurred_at' desc), '[]'::jsonb)
+  into v_result
+  from (
+    select jsonb_build_object(
+      'id', t.id,
+      'occurred_at', t.occurred_at,
+      'transaction_type', t.transaction_type,
+      'amount', t.amount,
+      'balance_after', t.balance_after,
+      'reason_category', t.reason_category,
+      'description', t.description,
+      'cash_close_report_id', t.cash_close_report_id,
+      'cash_day_opening_id', t.cash_day_opening_id,
+      'created_by', t.created_by,
+      'created_at', t.created_at
+    ) as item
+    from public.safe_transactions t
+    where (p_from is null or t.occurred_at::date >= p_from)
+      and (p_to is null or t.occurred_at::date <= p_to)
+      and (p_type is null or t.transaction_type = p_type)
+  ) sub;
+
+  return v_result;
+end;
+$$;
+
+grant execute on function public.safe_list_transactions(date, date, text) to authenticated;
+
+-- =============================================================================
+-- Cập nhật finalize_cash_close_report + save_cash_day_opening để tích hợp
+-- safe_transactions (deposit_close + withdraw_open).
+-- =============================================================================
+
+-- Sửa save_cash_day_opening: accept safe_withdrawal_amount trong payload.
+-- 3 scenarios:
+--   1. carry-over only: safe_withdrawal = 0
+--   2. withdraw safe: safe_withdrawal = opening_total
+--   3. combine: 0 < safe_withdrawal < opening_total
+create or replace function public.save_cash_day_opening(p_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_date date := coalesce((p_payload->>'business_date')::date, current_date);
+  v_denominations jsonb := coalesce(p_payload->'denominations_json', '{}'::jsonb);
+  v_carried boolean := coalesce((p_payload->>'carried_from_previous_day')::boolean, false);
+  v_safe_withdrawal numeric(14,2) := coalesce((p_payload->>'safe_withdrawal_amount')::numeric, 0);
+  v_total numeric(14,2) := 0;
+  v_carried_amount numeric(14,2) := 0;
+  v_role text := public.app_role();
+  v_existing public.cash_day_openings%rowtype;
+  v_row public.cash_day_openings%rowtype;
+  v_safe_balance numeric(14,2);
+begin
+  if v_role not in ('owner','manager') then
+    raise exception 'Bạn không có quyền nhập tiền đầu ngày.';
+  end if;
+
+  perform 1
+  from jsonb_each_text(v_denominations) as d(k, v)
+  where not (
+    k ~ '^(1000|2000|5000|10000|20000|50000|100000|200000|500000)$'
+    and v ~ '^[0-9]+$'
+    and v::numeric between 0 and 10000
+  );
+  if found then
+    raise exception 'denominations_json: chỉ chấp nhận mệnh giá VND 1k-500k và số lượng 0-10000.';
+  end if;
+
+  select coalesce(sum(key::numeric * value::numeric), 0)
+  into v_total
+  from jsonb_each_text(v_denominations);
+
+  -- Validate safe_withdrawal: 0 ≤ amount ≤ opening_total
+  if v_safe_withdrawal < 0 then
+    raise exception 'safe_withdrawal_amount không được âm.';
+  end if;
+  if v_safe_withdrawal > v_total then
+    raise exception 'safe_withdrawal_amount (%) không được vượt opening_total (%).', v_safe_withdrawal, v_total;
+  end if;
+  if v_safe_withdrawal > 0 then
+    -- Owner-only enforce thêm
+    if v_role <> 'owner' then
+      raise exception 'Chỉ owner được rút từ sổ quỹ. Manager chỉ carry-over.';
+    end if;
+    v_safe_balance := public.safe_balance_now();
+    if v_safe_balance < v_safe_withdrawal then
+      raise exception 'Sổ quỹ không đủ. Số dư %, rút %.', v_safe_balance, v_safe_withdrawal;
+    end if;
+  end if;
+  v_carried_amount := v_total - v_safe_withdrawal;
+
+  select * into v_existing
+  from public.cash_day_openings
+  where business_date = v_date;
+
+  if found then
+    if v_role <> 'owner' then
+      raise exception 'Tiền đầu ngày đã lưu, chỉ chủ quán được chỉnh sửa.';
+    end if;
+
+    update public.cash_day_openings
+    set denominations_json = v_denominations,
+        opening_total = v_total,
+        carried_from_previous_day = v_carried,
+        carried_amount = v_carried_amount,
+        safe_withdrawal_amount = v_safe_withdrawal
+    where id = v_existing.id
+    returning * into v_row;
+  else
+    insert into public.cash_day_openings (
+      business_date,
+      denominations_json,
+      opening_total,
+      carried_from_previous_day,
+      carried_amount,
+      safe_withdrawal_amount,
+      created_by
+    )
+    values (
+      v_date,
+      v_denominations,
+      v_total,
+      v_carried,
+      v_carried_amount,
+      v_safe_withdrawal,
+      auth.uid()
+    )
+    returning * into v_row;
+  end if;
+
+  delete from public.cash_drawer_events
+  where business_date = v_date
+    and event_type = 'opening_cash'
+    and source = 'app_action';
+
+  if v_total > 0 then
+    insert into public.cash_drawer_events (
+      business_date,
+      occurred_at,
+      event_type,
+      direction,
+      amount,
+      created_by,
+      source,
+      note,
+      raw_json
+    )
+    values (
+      v_date,
+      now(),
+      'opening_cash',
+      'in',
+      v_total,
+      auth.uid(),
+      'app_action',
+      case when v_safe_withdrawal > 0 then 'Rút từ sổ quỹ ' || v_safe_withdrawal::text else 'Carry-over' end,
+      jsonb_build_object('opening_id', v_row.id, 'safe_withdrawal', v_safe_withdrawal)
+    );
+  end if;
+
+  -- Insert safe_transaction nếu rút từ sổ quỹ
+  if v_safe_withdrawal > 0 then
+    insert into public.safe_transactions (
+      transaction_type, amount, balance_after,
+      description, cash_day_opening_id, created_by
+    ) values (
+      'withdraw_open',
+      -v_safe_withdrawal,
+      public.safe_balance_now() - v_safe_withdrawal,
+      'Rút mở két ngày ' || v_date::text,
+      v_row.id,
+      auth.uid()
+    );
+  end if;
+
+  return to_jsonb(v_row);
+end;
+$$;
+
+-- Sửa finalize_cash_close_report: accept p_leave_for_next_day, auto-deposit dư
+-- vào sổ quỹ.
+create or replace function public.finalize_cash_close_report(
+  p_cash_count_id uuid,
+  p_leave_for_next_day numeric default 0
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_count public.cash_counts%rowtype;
+  v_theory jsonb;
+  v_report_id uuid;
+  v_existing public.cash_close_reports%rowtype;
+  v_pos_total numeric(14,2);
+  v_pos_cash numeric(14,2);
+  v_pos_non_cash numeric(14,2);
+  v_opening numeric(14,2);
+  v_bank_transfer numeric(14,2);
+  v_expense numeric(14,2);
+  v_payroll numeric(14,2);
+  v_theory_cash numeric(14,2);
+  v_reconciliation numeric(14,2);
+  v_difference numeric(14,2);
+  v_safe_deposit numeric(14,2);
+  v_leave numeric(14,2) := coalesce(p_leave_for_next_day, 0);
+begin
+  if not public.app_is_staff_or_above() then raise exception 'Bạn không có quyền chốt báo cáo két.'; end if;
+  select * into v_count from public.cash_counts where id = p_cash_count_id;
+  if not found then raise exception 'Không tìm thấy bản kiểm két.'; end if;
+  select * into v_existing from public.cash_close_reports where cash_count_id = p_cash_count_id;
+  if found and v_existing.report_status = 'final' then
+    return jsonb_build_object('report_id', v_existing.id, 'status', 'final');
+  end if;
+
+  -- Validate leave_for_next_day
+  if v_leave < 0 then
+    raise exception 'leave_for_next_day không được âm.';
+  end if;
+  if v_leave > v_count.total_physical then
+    raise exception 'leave_for_next_day (%) không được vượt physical_cash (%).', v_leave, v_count.total_physical;
+  end if;
+  v_safe_deposit := v_count.total_physical - v_leave;
+
+  v_theory := public.compute_cash_theory(v_count.business_date, v_count.counted_at, v_count.bank_transfer_confirmed);
+  v_pos_total := coalesce(nullif(v_count.pos_total, 0), (v_theory->>'pos_total')::numeric);
+  v_pos_cash := coalesce(nullif(v_count.pos_cash_total, 0), (v_theory->>'pos_cash_total')::numeric);
+  v_pos_non_cash := coalesce(nullif(v_count.pos_non_cash_total, 0), (v_theory->>'pos_non_cash_total')::numeric);
+  v_opening := coalesce(nullif(v_count.opening_cash, 0), (v_theory->>'opening_cash')::numeric);
+  v_bank_transfer := coalesce(v_count.bank_transfer_confirmed, (v_theory->>'bank_transfer_confirmed')::numeric, 0);
+  v_expense := (v_theory->>'expense_cash_total')::numeric;
+  v_payroll := (v_theory->>'payroll_cash_total')::numeric;
+  v_theory_cash := (v_theory->>'theory_cash')::numeric;
+  v_reconciliation := coalesce(nullif(v_count.reconciliation_total, 0), (v_count.total_physical - v_opening) + v_bank_transfer + v_expense + v_payroll);
+  v_difference := coalesce(v_count.difference, v_pos_total - v_reconciliation);
+
+  insert into public.cash_close_reports (
+    business_date, cash_count_id, closed_at, closed_by,
+    pos_total, opening_cash, pos_cash_total, pos_non_cash_total, bank_transfer_confirmed,
+    expense_cash_total, payroll_cash_total, theory_cash, reconciliation_total,
+    physical_cash, difference, denominations_json, sync_snapshot_at, note,
+    safe_deposit_amount, leave_for_next_day,
+    report_status
+  ) values (
+    v_count.business_date, p_cash_count_id, now(), auth.uid(),
+    v_pos_total, v_opening, v_pos_cash, v_pos_non_cash, v_bank_transfer,
+    v_expense, v_payroll, v_theory_cash, v_reconciliation,
+    v_count.total_physical, v_difference, v_count.denominations_json, v_count.sales_snapshot_at, v_count.note,
+    v_safe_deposit, v_leave,
+    'final'
+  )
+  on conflict (cash_count_id) do update set
+    closed_at = excluded.closed_at,
+    closed_by = excluded.closed_by,
+    pos_total = excluded.pos_total,
+    opening_cash = excluded.opening_cash,
+    pos_cash_total = excluded.pos_cash_total,
+    pos_non_cash_total = excluded.pos_non_cash_total,
+    bank_transfer_confirmed = excluded.bank_transfer_confirmed,
+    expense_cash_total = excluded.expense_cash_total,
+    payroll_cash_total = excluded.payroll_cash_total,
+    theory_cash = excluded.theory_cash,
+    reconciliation_total = excluded.reconciliation_total,
+    physical_cash = excluded.physical_cash,
+    difference = excluded.difference,
+    denominations_json = excluded.denominations_json,
+    sync_snapshot_at = excluded.sync_snapshot_at,
+    note = excluded.note,
+    safe_deposit_amount = excluded.safe_deposit_amount,
+    leave_for_next_day = excluded.leave_for_next_day,
+    report_status = 'final'
+  returning id into v_report_id;
+
+  -- Auto-deposit dư vào sổ quỹ (nếu safe_deposit > 0)
+  if v_safe_deposit > 0 then
+    insert into public.safe_transactions (
+      transaction_type, amount, balance_after,
+      description, cash_close_report_id, created_by
+    ) values (
+      'deposit_close',
+      v_safe_deposit,
+      public.safe_balance_now() + v_safe_deposit,
+      'Nạp từ chốt két ngày ' || v_count.business_date::text,
+      v_report_id,
+      auth.uid()
+    );
+  end if;
+
+  return jsonb_build_object('report_id', v_report_id, 'status', 'final', 'safe_deposit', v_safe_deposit);
+end;
+$$;
+
+-- Audit triggers cho safe_transactions + safe_counts
+drop trigger if exists audit_safe_transactions on public.safe_transactions;
+create trigger audit_safe_transactions
+  after insert or update or delete on public.safe_transactions
+  for each row execute function public._audit_row_change();
+
+drop trigger if exists audit_safe_counts on public.safe_counts;
+create trigger audit_safe_counts
+  after insert or update or delete on public.safe_counts
+  for each row execute function public._audit_row_change();

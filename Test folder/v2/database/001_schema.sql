@@ -417,6 +417,82 @@ create table if not exists public.audit_log (
 );
 create index if not exists audit_log_entity_idx on public.audit_log(entity_type, entity_id);
 create index if not exists audit_log_actor_idx on public.audit_log(actor_user_id, occurred_at desc);
+
+-- -----------------------------------------------------------------------------
+-- Sổ quỹ (cash safe / vault) — owner-only ledger tách biệt với két ca
+-- -----------------------------------------------------------------------------
+
+-- Tất cả giao dịch sổ quỹ. balance_after là số dư sau giao dịch (denormalized
+-- để query nhanh + dễ audit). Mọi insert đi qua security definer RPC trong
+-- 002_functions.sql; direct insert bị RLS block.
+create table if not exists public.safe_transactions (
+  id uuid primary key default gen_random_uuid(),
+  occurred_at timestamptz not null default now(),
+  transaction_type text not null check (transaction_type in (
+    'initial_setup',
+    'deposit_close',
+    'withdraw_open',
+    'withdraw_other',
+    'adjustment'
+  )),
+  amount numeric(14,2) not null,
+  balance_after numeric(14,2) not null,
+  reason_category text,
+  description text,
+  cash_close_report_id uuid references public.cash_close_reports(id) on delete set null,
+  cash_day_opening_id uuid references public.cash_day_openings(id) on delete set null,
+  created_by uuid references auth.users(id),
+  created_at timestamptz not null default now()
+);
+create index if not exists safe_transactions_time_idx on public.safe_transactions(occurred_at desc);
+create index if not exists safe_transactions_type_idx on public.safe_transactions(transaction_type, occurred_at desc);
+
+-- Snapshot mệnh giá khi owner đếm thực tế (Hybrid model — total tracked tự động,
+-- denomination chỉ snapshot khi cần). KHÔNG tự adjust balance — owner phải gọi
+-- explicit safe_adjust nếu muốn fix discrepancy.
+create table if not exists public.safe_counts (
+  id uuid primary key default gen_random_uuid(),
+  counted_at timestamptz not null default now(),
+  denominations_json jsonb not null default '{}'::jsonb,
+  total_physical numeric(14,2) not null,
+  expected_balance numeric(14,2) not null,
+  difference numeric(14,2) not null,
+  note text,
+  counted_by uuid references auth.users(id),
+  created_at timestamptz not null default now()
+);
+create index if not exists safe_counts_time_idx on public.safe_counts(counted_at desc);
+
+-- CHECK constraints cho safe_transactions amount sign
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'safe_transactions_amount_sign_check') then
+    alter table public.safe_transactions add constraint safe_transactions_amount_sign_check check (
+      case transaction_type
+        when 'initial_setup'  then amount >= 0
+        when 'deposit_close'  then amount >= 0
+        when 'withdraw_open'  then amount <= 0
+        when 'withdraw_other' then amount <= 0
+        when 'adjustment'     then true
+        else false
+      end
+    );
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'safe_transactions_balance_check') then
+    alter table public.safe_transactions add constraint safe_transactions_balance_check
+      check (balance_after >= 0);
+  end if;
+end $$;
+
+-- Thêm cột tracking trên cash_close_reports + cash_day_openings để link với
+-- safe_transactions (cash close → deposit_close, cash open → withdraw_open).
+alter table public.cash_close_reports
+  add column if not exists safe_deposit_amount numeric(14,2) not null default 0,
+  add column if not exists leave_for_next_day numeric(14,2) not null default 0;
+
+alter table public.cash_day_openings
+  add column if not exists safe_withdrawal_amount numeric(14,2) not null default 0,
+  add column if not exists carried_amount numeric(14,2) not null default 0;
 create index if not exists audit_log_time_idx on public.audit_log(occurred_at desc);
 
 -- -----------------------------------------------------------------------------
