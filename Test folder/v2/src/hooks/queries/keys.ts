@@ -16,5 +16,9 @@ export const queryKeys = {
   reports: (businessDate: string) => ["reports", businessDate] as const,
   cashOpening: (businessDate: string) => ["cash-opening", businessDate] as const,
   cashCounts: (businessDate: string) => ["cash-counts", businessDate] as const,
-  handover: (businessDate: string) => ["handover", businessDate] as const
+  handover: (businessDate: string) => ["handover", businessDate] as const,
+  safeBalance: () => ["safe", "balance"] as const,
+  safeTransactions: (filter?: { from?: string; to?: string; type?: string }) =>
+    ["safe", "transactions", filter ?? {}] as const,
+  safeCounts: () => ["safe", "counts"] as const
 };

@@ -9,3 +9,4 @@ export * from "./cash";
 export * from "./reports";
 export * from "./handover";
 export * from "./pos-sync";
+export * from "./safe";

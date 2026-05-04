@@ -6,3 +6,8 @@ export { useExpenseCategoriesQuery, useExpenseTemplatesQuery } from "./use-expen
 export { useEmployeesQuery, useShiftsQuery, usePayrollQuery } from "./use-shift-queries";
 export { useCashCountsQuery, useCashOpeningQuery, useReportsQuery } from "./use-cash-queries";
 export { useHandoverQuery } from "./use-handover-query";
+export {
+  useSafeBalanceQuery,
+  useSafeCountsQuery,
+  useSafeTransactionsQuery
+} from "./use-safe-queries";

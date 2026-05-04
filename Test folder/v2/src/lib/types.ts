@@ -145,12 +145,72 @@ export type CashCount = {
   report_status?: string | null;
 };
 
+export type SafeTransactionType =
+  | "initial_setup"
+  | "deposit_close"
+  | "withdraw_open"
+  | "withdraw_other"
+  | "adjustment";
+
+export type SafeWithdrawCategory =
+  | "utilities"
+  | "rent"
+  | "inventory"
+  | "maintenance"
+  | "other";
+
+export type SafeTransaction = {
+  id: string;
+  occurred_at: string;
+  transaction_type: SafeTransactionType;
+  amount: number;
+  balance_after: number;
+  reason_category: SafeWithdrawCategory | null;
+  description: string | null;
+  cash_close_report_id: string | null;
+  cash_day_opening_id: string | null;
+  created_by: string | null;
+  created_at: string;
+};
+
+export type SafeCount = {
+  id: string;
+  counted_at: string;
+  denominations_json: Record<string, number>;
+  total_physical: number;
+  expected_balance: number;
+  difference: number;
+  note: string | null;
+  counted_by: string | null;
+  created_at: string;
+};
+
+export const SAFE_TRANSACTION_LABELS: Record<SafeTransactionType, string> = {
+  initial_setup: "Khởi tạo",
+  deposit_close: "Nạp từ chốt két",
+  withdraw_open: "Rút mở két",
+  withdraw_other: "Rút mục đích khác",
+  adjustment: "Điều chỉnh"
+};
+
+export const SAFE_WITHDRAW_CATEGORY_LABELS: Record<SafeWithdrawCategory, string> = {
+  utilities: "Tiền điện / nước / mạng",
+  rent: "Tiền thuê / dịch vụ",
+  inventory: "Mua nguyên liệu lớn",
+  maintenance: "Sửa chữa / bảo trì",
+  other: "Khác"
+};
+
 export type CashDayOpening = {
   id: string;
   business_date: string;
   denominations_json: Record<string, number>;
   opening_total: number;
   carried_from_previous_day: boolean;
+  /** Phần đến từ carry-over ngày cũ (= opening_total - safe_withdrawal_amount) */
+  carried_amount?: number;
+  /** Phần rút từ sổ quỹ (≥ 0). Insert vào safe_transactions tự động. */
+  safe_withdrawal_amount?: number;
   created_by: string | null;
   created_at: string;
   updated_at: string;

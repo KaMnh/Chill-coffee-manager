@@ -38,6 +38,10 @@ export function useRealtimeInvalidate(supabase: SupabaseClient | null, businessD
       .on("postgres_changes", { event: "*", schema: "public", table: "expenses" }, () => {
         queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(businessDate) });
       })
+      .on("postgres_changes", { event: "*", schema: "public", table: "safe_transactions" }, () => {
+        queryClient.invalidateQueries({ queryKey: queryKeys.safeBalance() });
+        queryClient.invalidateQueries({ queryKey: ["safe", "transactions"] });
+      })
       .subscribe();
     return () => {
       void supabase.removeChannel(channel);
