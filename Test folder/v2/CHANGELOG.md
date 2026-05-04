@@ -6,6 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/), versioning [Sema
 
 ---
 
+## [2.2.0] — 2026-05-04
+
+### Added
+- **Sổ quỹ (cash safe)** — owner-only ledger riêng biệt với két ca:
+  - 2 tables mới (`safe_transactions` + `safe_counts`) với 5 transaction types: initial_setup / deposit_close / withdraw_open / withdraw_other / adjustment.
+  - 6 RPCs mới (`safe_balance_now`, `safe_setup_initial`, `safe_withdraw_other`, `safe_adjust`, `safe_count`, `safe_list_transactions`) — security definer + role-check. Row-level lock chống race condition.
+  - Sidebar tab "Sổ quỹ" (icon PiggyBank) — owner only.
+  - Balance card + history table với filter (date range + transaction type).
+  - 3 modals: Withdraw (5 categories cố định) / Adjust (note bắt buộc ≥5 chars) / Count (snapshot mệnh giá, KHÔNG auto-adjust).
+  - Audit triggers cho cả 2 bảng → `audit_log`.
+- **Chốt két → tự động nạp sổ quỹ**: field "Để lại cho ngày mai" trong cash-panel. Default 0 = nạp toàn bộ dư vào sổ quỹ. RPC `finalize_cash_close_report` accept `p_leave_for_next_day`.
+- **Mở két ngày mới — 3 scenarios**: opening cash modal có block "Rút từ sổ quỹ" (owner only). Carry-over only / Withdraw safe / Combine.
+  - `cash_close_reports` thêm cột `safe_deposit_amount`, `leave_for_next_day`.
+  - `cash_day_openings` thêm cột `carried_amount`, `safe_withdrawal_amount`.
+
+### Bundle impact
+- 6 lucide icons mới (`PiggyBank`, `ArrowDownToLine`, `ArrowUpFromLine`, `Calculator`, `SlidersHorizontal`, `Wallet2`).
+- SafePanel dynamic import (~code-split).
+
+### Database migration
+- Apply lại `database/001_schema.sql` → `004_seed.sql` (idempotent).
+- Hoặc apply chỉ delta: tables mới + columns mới + RPCs trong `002_functions.sql` (tất cả `create or replace`).
+
+### Spec
+- Full design tại `docs/specs/2026-05-04-so-quy-design.md`.
+
+---
+
 ## [2.1.0] — 2026-05-04
 
 ### Added
