@@ -2,12 +2,17 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CashCloseReport } from "@/lib/types";
 import { toAppError, unwrapJson } from "./_common";
 
-export async function finalizeCashCloseReport(supabase: SupabaseClient, cashCountId: string) {
+export async function finalizeCashCloseReport(
+  supabase: SupabaseClient,
+  cashCountId: string,
+  options: { leaveForNextDay?: number } = {}
+) {
   const { data, error } = await supabase.rpc("finalize_cash_close_report", {
-    p_cash_count_id: cashCountId
+    p_cash_count_id: cashCountId,
+    p_leave_for_next_day: Math.max(0, Number(options.leaveForNextDay ?? 0))
   });
   if (error) throw toAppError(error, "Không chốt được báo cáo két.");
-  return data as { report_id?: string };
+  return data as { report_id?: string; safe_deposit?: number };
 }
 
 export async function loadCashCloseReportsByDate(supabase: SupabaseClient, businessDate: string) {

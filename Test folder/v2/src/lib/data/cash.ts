@@ -34,7 +34,7 @@ export async function loadCashCountsByDate(
 export async function loadCashDayOpening(supabase: SupabaseClient, businessDate: string) {
   const { data, error } = await supabase
     .from("cash_day_openings")
-    .select("id, business_date, denominations_json, opening_total, carried_from_previous_day, created_by, created_at, updated_at")
+    .select("id, business_date, denominations_json, opening_total, carried_from_previous_day, carried_amount, safe_withdrawal_amount, created_by, created_at, updated_at")
     .eq("business_date", businessDate)
     .maybeSingle();
   if (error) throw toAppError(error, "Không tải được tiền đầu ngày.");
@@ -47,6 +47,8 @@ export async function saveCashDayOpening(
     business_date: string;
     denominations_json: Record<string, number>;
     carried_from_previous_day?: boolean;
+    /** Optional: số tiền rút từ sổ quỹ (owner only, > 0). RPC validate ≤ opening_total. */
+    safe_withdrawal_amount?: number;
   }
 ) {
   const denominations = Object.fromEntries(

@@ -579,6 +579,12 @@ th { color: #7a5941; font-size: 12px; text-transform: uppercase; }
 .badgeButton { background: transparent; border: 0; padding: 0; cursor: pointer; }
 .badgeButton:disabled { cursor: not-allowed; opacity: 0.6; }
 
+/* Safe withdraw block in opening cash modal */
+.safeWithdrawBlock { border: 1px dashed var(--line); border-radius: 12px; padding: 12px; background: #fffaf2; display: grid; gap: 8px; }
+.safeWithdrawBlock .eyebrow { margin: 0; }
+.safeWithdrawHint { font-size: 12px; line-height: 1.5; margin: 0; font-weight: 400; text-transform: none; color: var(--muted); }
+.safeWithdrawSplit { font-size: 12px; margin: 0; font-weight: 400; text-transform: none; }
+
 /* Sổ quỹ — Safe panel */
 .safeBalanceCard { display: grid; grid-template-columns: minmax(0, 1.5fr) auto; gap: 18px; align-items: center; padding: 22px; }
 .safeBalanceLeft { display: grid; gap: 6px; }
