@@ -1,0 +1,19 @@
+﻿node_modules
+.next
+out
+.env
+.env.local
+.env.*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.DS_Store
+docker-data
+tmp-*
+
+# Claude Code local config (per-machine permission whitelist)
+.claude/
+
+# TypeScript incremental build cache (regenerated per build)
+*.tsbuildinfo
